@@ -1,0 +1,22 @@
+# State is now split PER STACK — each stack (registry, gateway, demo) has its
+# own state object and its own backend config. Use the per-stack examples:
+#   env/registry.dev.backend.hcl.example  -> infra/registry
+#   env/gateway.dev.backend.hcl.example   -> infra/gateway
+#   env/demo.dev.backend.hcl.example      -> infra/demo
+#
+# This file is kept as the shared template for the keys every stack's backend
+# config must set (all *.dev.backend.hcl are gitignored). Create the S3 state
+# bucket beforehand: versioned, SSE-KMS encrypted, public-access-blocked. The
+# `key` differs per stack ("<env>/<stack>/terraform.tfstate"); pass the same
+# bucket to each stack as -var 'state_bucket=...' so cross-stack
+# terraform_remote_state reads resolve.
+bucket = "terraform-state-<YOUR_AWS_ACCOUNT_ID>"
+key    = "dev/<stack>/terraform.tfstate"
+region = "eu-north-1"
+
+encrypt = true
+# SSE-KMS CMK for state-at-rest encryption (omit for SSE-S3/AES256).
+kms_key_id = "arn:aws:kms:eu-north-1:<YOUR_AWS_ACCOUNT_ID>:key/<STATE_CMK_KEY_ID>"
+
+# Native S3 state locking (Terraform >= 1.10) — no DynamoDB lock table needed.
+use_lockfile = true

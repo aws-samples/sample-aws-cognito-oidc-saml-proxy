@@ -1,0 +1,147 @@
+{
+  "title": "Identity Federation Gateway — AWS Deployment Architecture",
+  "direction": "LR",
+  "theme": "light",
+  "style": "formal",
+  "nodes": [
+    { "id": "admin", "label": "Platform\nAdmin", "icon": "Users" },
+    { "id": "enduser", "label": "End User", "icon": "Users" },
+
+    { "id": "waf", "label": "AWS WAF\nOWASP + rate limits", "icon": "WAF" },
+    { "id": "cf", "label": "CloudFront\nSPA + API + CSP", "icon": "CloudFront" },
+
+    { "id": "s3spa", "label": "S3 — Admin\nConsole SPA (OAC)", "icon": "Simple Storage Service" },
+    { "id": "apigw", "label": "API Gateway (HTTP)\nCognito JWT authorizer", "icon": "API Gateway" },
+    { "id": "cognito", "label": "Cognito User Pool\nadmin + identity source", "icon": "Cognito" },
+    { "id": "ecr", "label": "ECR\nLambda images (8 repos)", "icon": "Elastic Container Registry" },
+
+    { "id": "l_saml_sso", "label": "saml-sso", "icon": "Lambda" },
+    { "id": "l_saml_slo", "label": "saml-slo", "icon": "Lambda" },
+    { "id": "l_saml_meta", "label": "saml-metadata", "icon": "Lambda" },
+    { "id": "l_oidc_auth", "label": "oidc-authorize", "icon": "Lambda" },
+    { "id": "l_oidc_token", "label": "oidc-token", "icon": "Lambda" },
+    { "id": "l_oidc_disc", "label": "oidc-discovery", "icon": "Lambda" },
+    { "id": "l_mgmt", "label": "management-api", "icon": "Lambda" },
+    { "id": "l_health", "label": "health", "icon": "Lambda" },
+
+    { "id": "ddb_config", "label": "DynamoDB\nconfig (single-table)", "icon": "DynamoDB" },
+    { "id": "ddb_session", "label": "DynamoDB\nsession (TTL)", "icon": "DynamoDB" },
+    { "id": "s3iac", "label": "S3 — IaC\ntemplates", "icon": "Simple Storage Service" },
+
+    { "id": "kms_sign", "label": "KMS — signing\nRSA (SAML/OIDC)", "icon": "Key Management Service" },
+    { "id": "kms_backup", "label": "KMS — backup\nsigning (optional)", "icon": "Key Management Service" },
+    { "id": "kms_enc", "label": "KMS — encryption\nsymmetric", "icon": "Key Management Service" },
+
+    { "id": "cwlogs", "label": "CloudWatch Logs\naudit trail", "icon": "CloudWatch" },
+    { "id": "alarms", "label": "CloudWatch\nAlarms", "icon": "CloudWatch_Alarm" },
+    { "id": "sns", "label": "SNS\nemail alerts", "icon": "Simple Notification Service" },
+    { "id": "eventbridge", "label": "EventBridge\nhealth schedule", "icon": "EventBridge" },
+
+    { "id": "demo_saml", "label": "Demo SAML SP\nLambda + API GW + CF", "icon": "Lambda" },
+    { "id": "demo_oidc", "label": "Demo OIDC RP\nLambda + API GW + CF", "icon": "Lambda" },
+
+    { "id": "cui_cf", "label": "CloudFront\n+ optional IP WAF", "icon": "CloudFront" },
+    { "id": "cui_s3", "label": "S3 (private, OAC)\ncustom login SPA", "icon": "Simple Storage Service" }
+  ],
+  "edges": [
+    { "from": "admin", "to": "cf", "label": "console (HTTPS)", "color": "#FF9900", "weight": "10" },
+    { "from": "enduser", "to": "cf", "label": "SSO (HTTPS)", "color": "#FF9900", "weight": "10" },
+    { "from": "cf", "to": "waf", "label": "inspect", "style": "dashed", "color": "#DD344C" },
+    { "from": "cf", "to": "s3spa", "label": "SPA assets", "color": "#7AA116" },
+    { "from": "cf", "to": "apigw", "label": "/api, /t/*, /login", "color": "#FF9900", "weight": "10" },
+
+    { "from": "apigw", "to": "cognito", "label": "JWT authorizer", "style": "dashed", "color": "#8C4FFF" },
+    { "from": "apigw", "to": "l_saml_sso", "label": "saml/sso,acs", "color": "#7D8998" },
+    { "from": "apigw", "to": "l_saml_slo", "label": "saml/slo", "color": "#7D8998" },
+    { "from": "apigw", "to": "l_saml_meta", "label": "saml/metadata", "color": "#7D8998" },
+    { "from": "apigw", "to": "l_oidc_auth", "label": "oidc/authorize", "color": "#7D8998" },
+    { "from": "apigw", "to": "l_oidc_token", "label": "oidc/token", "color": "#7D8998" },
+    { "from": "apigw", "to": "l_oidc_disc", "label": "oidc/.well-known", "color": "#7D8998" },
+    { "from": "apigw", "to": "l_mgmt", "label": "ANY /api/v1/* (JWT)", "color": "#8C4FFF" },
+    { "from": "apigw", "to": "l_health", "label": "/health", "color": "#7D8998" },
+
+    { "from": "l_saml_sso", "to": "ddb_config", "label": "config", "color": "#527FFF" },
+    { "from": "l_saml_sso", "to": "ddb_session", "label": "sessions", "color": "#527FFF" },
+    { "from": "l_saml_sso", "to": "kms_sign", "label": "sign assertion", "color": "#8C4FFF" },
+    { "from": "l_saml_sso", "to": "cognito", "label": "user + groups", "style": "dashed", "color": "#8C4FFF" },
+    { "from": "l_saml_sso", "to": "cwlogs", "label": "audit", "color": "#232F3E" },
+    { "from": "l_oidc_token", "to": "kms_sign", "label": "sign JWT", "color": "#8C4FFF" },
+    { "from": "l_mgmt", "to": "ddb_config", "label": "CRUD config", "color": "#527FFF" },
+    { "from": "l_mgmt", "to": "s3iac", "label": "put templates", "color": "#7AA116" },
+
+    { "from": "ddb_config", "to": "kms_enc", "label": "SSE", "style": "dashed", "color": "#DD344C" },
+    { "from": "ecr", "to": "l_saml_sso", "label": "image pull", "style": "dashed", "color": "#7D8998" },
+
+    { "from": "eventbridge", "to": "l_health", "label": "every 5 min", "style": "dashed", "color": "#FF9900" },
+    { "from": "apigw", "to": "alarms", "label": "API/DDB metrics", "style": "dashed", "color": "#7D8998" },
+    { "from": "alarms", "to": "sns", "label": "alarm", "color": "#DD344C" },
+
+    { "from": "demo_saml", "to": "cf", "label": "SSO via gateway", "style": "dashed", "color": "#7D8998", "dir": "back" },
+    { "from": "demo_oidc", "to": "cf", "label": "SSO via gateway", "style": "dashed", "color": "#7D8998", "dir": "back" },
+
+    { "from": "enduser", "to": "cui_cf", "label": "custom login (optional)", "style": "dashed", "color": "#01A88D" },
+    { "from": "cui_cf", "to": "cui_s3", "label": "SPA (OAC)", "color": "#7AA116" },
+    { "from": "cui_cf", "to": "cognito", "label": "Cognito auth (SRP/refresh)", "style": "dashed", "color": "#01A88D" },
+    { "from": "cui_cf", "to": "cf", "label": "SSO / app launcher", "style": "dashed", "color": "#01A88D" }
+  ],
+  "clusters": [
+    {
+      "id": "aws",
+      "label": "AWS Cloud",
+      "type": "cloud",
+      "nodes": [],
+      "clusters": [
+        {
+          "id": "edge",
+          "label": "Edge — CloudFront (global) + WAF (us-east-1)",
+          "type": "region",
+          "nodes": ["waf", "cf"]
+        },
+        {
+          "id": "region",
+          "label": "Region — us-east-1",
+          "type": "region",
+          "nodes": ["s3spa", "apigw", "cognito", "ecr"],
+          "clusters": [
+            {
+              "id": "compute",
+              "label": "Lambda — per-capability functions (arm64 containers)",
+              "type": "generic",
+              "nodes": ["l_saml_sso", "l_saml_slo", "l_saml_meta", "l_oidc_auth", "l_oidc_token", "l_oidc_disc", "l_mgmt", "l_health"]
+            },
+            {
+              "id": "data",
+              "label": "Data stores",
+              "type": "generic",
+              "nodes": ["ddb_config", "ddb_session", "s3iac"]
+            },
+            {
+              "id": "security",
+              "label": "Signing & encryption (KMS)",
+              "type": "security-group",
+              "nodes": ["kms_sign", "kms_backup", "kms_enc"]
+            },
+            {
+              "id": "ops",
+              "label": "Observability & ops",
+              "type": "generic",
+              "nodes": ["cwlogs", "alarms", "sns", "eventbridge"]
+            },
+            {
+              "id": "demo",
+              "label": "Demo relying parties (optional)",
+              "type": "generic-dashed",
+              "nodes": ["demo_saml", "demo_oidc"]
+            }
+          ]
+        },
+        {
+          "id": "customui",
+          "label": "Cognito Custom UI Demo — OPTIONAL (separate Terraform stack)",
+          "type": "generic-dashed",
+          "nodes": ["cui_cf", "cui_s3"]
+        }
+      ]
+    }
+  ]
+}

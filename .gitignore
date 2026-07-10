@@ -1,0 +1,95 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+go.work.sum
+bin/
+dist/
+proxy
+/fedctl
+scripts/test-sp/test-sp
+scripts/test-rp/test-rp
+# Compiled Lambda handler binaries (built into container images; source is main.go)
+cmd/health/health
+cmd/management-api/management-api
+cmd/oidc-authorize/oidc-authorize
+cmd/oidc-discovery/oidc-discovery
+cmd/oidc-token/oidc-token
+cmd/saml-metadata/saml-metadata
+cmd/saml-slo/saml-slo
+cmd/saml-sso/saml-sso
+# Local push helper (agent harness workaround; not for upstream)
+scripts/push-branch.sh
+
+# Terraform
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfplan
+infra/tfplan
+infra/.terraform.lock.hcl
+infra/env/*.auto.tfvars
+
+# Terraform state anywhere in the repo (incl. nested examples) — may contain
+# secrets; never commit. Patterns without a leading path are matched repo-wide.
+# 'tfplan*' also catches extension-less plan archives (e.g. tfplan-csp).
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan*
+
+# Environment-specific Terraform inputs / backend config (contain account IDs,
+# domains, emails). Commit only the *.example templates.
+infra/env/*.tfvars
+infra/env/*.backend.hcl
+!infra/env/*.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Frontend (for Plan 2)
+frontend/node_modules/
+frontend/dist/
+frontend/src/api/schema.d.ts
+
+# Deploy rollback artifacts (previous Lambda image digests + Cognito user
+# tenant-id backups). The backups contain usernames (PII) — never commit.
+deploy-state/
+
+# Docker
+*.tar
+.local-dev-signing-cert.pem
+.local-dev-signing-key.pem
+.playwright-mcp/
+
+# AI agents (Claude Code, Kiro, etc.)
+CLAUDE.md
+KIRO.md
+AGENTS.md
+.claude/
+.kiro/
+docs/screenshots/
+docs/threat-model.md
+
+# Local frontend env files (contain per-environment Cognito config)
+frontend/.env.local
+frontend/.env.*.local
+
+# Local security-scan outputs (share with Guardian; do not commit)
+scan-results/
+# ASH (Automated Security Helper) output — CI regenerates this as a job
+# artifact; never commit the local scan tree.
+.ash/

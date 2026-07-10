@@ -1,0 +1,12 @@
+# frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+
+# terraform
+infra/.terraform/
+infra/.terraform.lock.hcl
+infra/*.tfstate
+infra/*.tfstate.*
+infra/terraform.tfvars
+infra/*.tfplan

@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  supply-chain-guard:
+    name: Supply-chain guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: No Terraform plan/state artifacts committed
+        run: |
+          matches="$(git ls-files | grep -iE '(^|/)tfplan([-.]|$)|\.tfplan$|\.tfstate($|\.)' || true)"
+          if [ -n "$matches" ]; then
+            echo "::error::Terraform plan/state artifacts are tracked in git (may leak secrets); remove them and add to .gitignore:"
+            echo "$matches"
+            exit 1
+          fi
+          echo "No Terraform plan/state artifacts tracked."
+
+  go-checks:
+    name: Go checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 ./internal/...
+
+      - name: Test coverage
+        run: |
+          go test -race -coverprofile=coverage.out ./internal/...
+          go tool cover -func=coverage.out | tail -1
+
+  go-lint:
+    name: Go lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9.3.0
+        with:
+          version: v2.12.2
+
+  frontend-checks:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build
+        run: npm run build
+
+  terraform-checks:
+    name: Terraform checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "~1.13"
+
+      - name: Format check
+        run: terraform fmt -check -recursive
+
+      - name: Validate each stack
+        # The split topology has three independent roots (registry, gateway,
+        # demo) rather than one root under infra/, so init + validate run per
+        # stack.
+        run: |
+          for stack in registry gateway demo; do
+            echo "== validating infra/$stack =="
+            terraform -chdir="$stack" init -backend=false
+            terraform -chdir="$stack" validate
+          done
+
+      - name: Test gateway stack
+        # Run the gateway's offline security-hardening tests (mock_provider,
+        # no AWS creds needed). The gateway is the only stack with a tests/ dir.
+        run: terraform -chdir=gateway test
+
+  security-scan:
+    name: Security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+          govulncheck ./...
+
+  demo-app-build:
+    name: Demo apps build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [test-sp, test-rp]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: scripts/${{ matrix.app }}/go.mod
+
+      - name: Build
+        working-directory: scripts/${{ matrix.app }}
+        run: go build -o /dev/null .

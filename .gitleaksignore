@@ -1,0 +1,61 @@
+# gitleaks ignore file — reviewed false positives.
+#
+# gitleaks (and the Amazon Probe/Holmes secret-detection job) loads this file
+# automatically and suppresses any finding whose fingerprint is listed here.
+# Unlike .gitleaks.toml, .gitleaksignore is honored by the CI secret scanner.
+#
+# Every fingerprint below was manually triaged and is NOT a real secret. See
+# scan-results/SUMMARY.md for the full write-up. Two fingerprint forms are
+# listed per finding: the commit-prefixed form (history/`gitleaks git` scans)
+# and the commitless form (`gitleaks dir`/`--no-git` scans).
+
+# --- internal/cognito/auth_test.go: public jwt.io example token + dummy secrets ---
+71d8824008d01d906ef13794919b990bb21a0983:internal/cognito/auth_test.go:jwt:110
+71d8824008d01d906ef13794919b990bb21a0983:internal/cognito/auth_test.go:jwt:133
+7a528628242084bc03324df199439e8a62af160f:internal/cognito/auth_test.go:jwt:113
+5113ee533d34f15e4c75a0c45e8a9df0991f5f65:internal/cognito/auth_test.go:generic-api-key:479
+5113ee533d34f15e4c75a0c45e8a9df0991f5f65:internal/cognito/auth_test.go:generic-api-key:509
+internal/cognito/auth_test.go:jwt:110
+internal/cognito/auth_test.go:jwt:113
+internal/cognito/auth_test.go:jwt:133
+internal/cognito/auth_test.go:generic-api-key:479
+internal/cognito/auth_test.go:generic-api-key:509
+
+# --- frontend/src/pages/AnalyticsPage.tsx: Cloudscape DateRangePicker option keys ---
+78edd1d10680418a058304a10831dc33034d946b:frontend/src/pages/AnalyticsPage.tsx:generic-api-key:59
+78edd1d10680418a058304a10831dc33034d946b:frontend/src/pages/AnalyticsPage.tsx:generic-api-key:60
+78edd1d10680418a058304a10831dc33034d946b:frontend/src/pages/AnalyticsPage.tsx:generic-api-key:61
+61999ef83295f5ef6935e785cc8df895f78d5012:frontend/src/pages/AnalyticsPage.tsx:generic-api-key:60
+61999ef83295f5ef6935e785cc8df895f78d5012:frontend/src/pages/AnalyticsPage.tsx:generic-api-key:61
+61999ef83295f5ef6935e785cc8df895f78d5012:frontend/src/pages/AnalyticsPage.tsx:generic-api-key:62
+frontend/src/pages/AnalyticsPage.tsx:generic-api-key:59
+frontend/src/pages/AnalyticsPage.tsx:generic-api-key:60
+frontend/src/pages/AnalyticsPage.tsx:generic-api-key:61
+frontend/src/pages/AnalyticsPage.tsx:generic-api-key:62
+frontend/src/pages/AnalyticsPage.tsx:generic-api-key:64
+frontend/src/pages/AnalyticsPage.tsx:generic-api-key:65
+frontend/src/pages/AnalyticsPage.tsx:generic-api-key:66
+
+# --- frontend/src/pages/AuditLogPage.tsx: table/filter i18n strings ---
+61999ef83295f5ef6935e785cc8df895f78d5012:frontend/src/pages/AuditLogPage.tsx:generic-api-key:294
+61999ef83295f5ef6935e785cc8df895f78d5012:frontend/src/pages/AuditLogPage.tsx:generic-api-key:295
+frontend/src/pages/AuditLogPage.tsx:generic-api-key:294
+frontend/src/pages/AuditLogPage.tsx:generic-api-key:295
+
+# --- internal/aws/iam/prober_test.go: AWS docs example account/ARN (111122223333, -AB1234) ---
+fadaf73e421d22f981e957ce65a9d4584ba38e51:internal/aws/iam/prober_test.go:generic-api-key:178
+fadaf73e421d22f981e957ce65a9d4584ba38e51:internal/aws/iam/prober_test.go:generic-api-key:183
+internal/aws/iam/prober_test.go:generic-api-key:178
+internal/aws/iam/prober_test.go:generic-api-key:183
+
+# --- internal/api/app_handlers_test.go: test JSON payload ---
+9110865ffacd16d7842dd643a1abfad47d4bbfef:internal/api/app_handlers_test.go:generic-api-key:406
+internal/api/app_handlers_test.go:generic-api-key:406
+
+# --- cmd/proxy/main.go: Huma OpenAPI title/version literal (not a credential) ---
+a2c700cddbc6bdccb7a7ad7b6fadccb447f18458:cmd/proxy/main.go:generic-api-key:269
+cmd/proxy/main.go:generic-api-key:269
+
+# --- docs/superpowers/**: planning docs, deleted from tree but present in history ---
+74d897cd5b8e48005351f470e109423be352edec:docs/superpowers/plans/2026-04-19-plan-a-foundation.md:generic-api-key:811
+74d897cd5b8e48005351f470e109423be352edec:docs/superpowers/plans/2026-04-19-plan-a-foundation.md:generic-api-key:844

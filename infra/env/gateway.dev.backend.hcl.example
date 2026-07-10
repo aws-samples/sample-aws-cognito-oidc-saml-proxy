@@ -1,0 +1,25 @@
+# Backend config for the GATEWAY stack (infra/gateway).
+#
+# Copy to gateway.dev.backend.hcl (gitignored) and set your own values, then:
+#   cd infra/gateway
+#   terraform init -backend-config=../env/gateway.dev.backend.hcl
+#
+# The state bucket must be created beforehand and be:
+#   - versioned
+#   - encrypted with SSE-KMS (set kms_key_id below to your CMK)
+#   - public-access-blocked (account-level Block Public Access on)
+#
+# The `key` must match the terraform_remote_state config the demo stack uses to
+# read this stack's outputs: "<env>/gateway/terraform.tfstate". Pass the same
+# bucket name to the stack as -var 'state_bucket=...' (or in dev.tfvars) so the
+# gateway's read of the registry stack's outputs resolves to that object.
+bucket = "terraform-state-<YOUR_AWS_ACCOUNT_ID>"
+key    = "dev/gateway/terraform.tfstate"
+region = "eu-north-1"
+
+encrypt = true
+# SSE-KMS CMK for state-at-rest encryption (omit for SSE-S3/AES256).
+kms_key_id = "arn:aws:kms:eu-north-1:<YOUR_AWS_ACCOUNT_ID>:key/<STATE_CMK_KEY_ID>"
+
+# Native S3 state locking (Terraform >= 1.10) — no DynamoDB lock table needed.
+use_lockfile = true

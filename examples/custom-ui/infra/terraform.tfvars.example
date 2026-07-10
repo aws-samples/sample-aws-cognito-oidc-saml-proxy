@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars and fill in your values.
+
+aws_region  = "us-east-1"
+name_prefix = "cognito-custom-ui-demo"
+
+# Required — point the demo at your Cognito user pool + PUBLIC app client.
+cognito_user_pool_id = "us-east-1_xxxxxxxxx"
+cognito_client_id    = "xxxxxxxxxxxxxxxxxxxxxxxxxx"
+# cognito_region     = "us-east-1"   # defaults to aws_region when omitted
+
+# Optional — used by the Config / App Launcher pages.
+gateway_base_url = ""
+gateway_tenant   = ""
+# apps_json      = "[]"
+
+# OPTIONAL access control. Leave empty (default) for a public demo anyone can use.
+# To restrict to specific IPs, add them and a CloudFront WAF will be created:
+#   curl https://checkip.amazonaws.com
+# allowed_cidrs      = ["203.0.113.7/32"]
+# allowed_ipv6_cidrs = ["2001:db8::/64"]

@@ -1,0 +1,281 @@
+################################################################################
+# ASH (Automated Security Helper) scan configuration
+#
+# Suppressions are categorised below. Each entry requires a `path`, `reason`,
+# and optional `rule_id`. Use the narrowest possible path pattern to avoid
+# accidentally suppressing real findings in production code.
+################################################################################
+
+project_name: identity-gateway
+
+global_settings:
+  severity_threshold: MEDIUM
+
+  suppressions:
+    ###########################################################################
+    # VENDORED / GENERATED CODE — .terraform module cache
+    #
+    # Bandit findings in .terraform/ are in vendored copies of the
+    # terraform-aws-lambda module's internal packaging helpers (package.py,
+    # test_package_toml.py, test_zip_source.py). We do not own or modify this
+    # code; the correct fix path is a module version bump, not inline suppressions.
+    #
+    # Note: use **/.terraform/** (leading+trailing **) for ASH's recursive glob
+    # matching to find .terraform appearing anywhere in the path hierarchy.
+    ###########################################################################
+    - path: "**/.terraform/**"
+      reason: "Vendored terraform module cache — code is not owned by this project. Bandit findings are in upstream packaging utilities."
+
+    - path: "**/.terraform/**"
+      rule_id: "B101"
+      reason: "assert in upstream module test code — not our code, not in production path."
+
+    - path: "**/.terraform/**"
+      rule_id: "B103"
+      reason: "File permission in upstream module test helpers."
+
+    - path: "**/.terraform/**"
+      rule_id: "B108"
+      reason: "Hardcoded temp paths in upstream module test code."
+
+    - path: "**/.terraform/**"
+      rule_id: "B404"
+      reason: "subprocess import in upstream module packaging helper."
+
+    - path: "**/.terraform/**"
+      rule_id: "B602"
+      reason: "Shell injection pattern in upstream module packaging helper — not our code."
+
+    - path: "**/.terraform/**"
+      rule_id: "B603"
+      reason: "subprocess without shell in upstream module packaging helper."
+
+    - path: "**/.terraform/**"
+      rule_id: "B604"
+      reason: "Function call in shell in upstream module packaging helper."
+
+    ###########################################################################
+    # NODE_MODULES — transitive npm dependencies
+    #
+    # All direct dependency CVEs are patched via version bumps and `overrides`
+    # in frontend/package.json. Findings in node_modules/ are on transitive
+    # packages that cannot be directly upgraded; npm-audit reports these, but
+    # they are either already addressed by overrides or require upstream package
+    # releases. The frontend/package.json overrides block is the authoritative
+    # fix tracker.
+    ###########################################################################
+    - path: "**/node_modules/**"
+      reason: "Transitive npm dependencies — CVEs addressed via package.json overrides where possible. node_modules is not deployed; bundled output is what ships."
+
+    ###########################################################################
+    # DETECT-SECRETS — variable name false positives
+    #
+    # detect-secrets pattern-matches on the word "secret" appearing in variable
+    # names, function names, or comments. None of the following files contain
+    # real secrets — they reference secret ARNs, fetch secret values from Secrets
+    # Manager at runtime, or are test files with fixture values.
+    ###########################################################################
+    - path: "cmd/*/main.go"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "Variable name 'edgeSecret' / 'secretARN' matches detect-secrets keyword pattern. These are Secrets Manager ARN references, not raw credentials."
+
+    - path: "internal/crypto/edge_secret.go"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "Function and variable names contain 'secret' — this is the SM fetch helper, not a hardcoded credential."
+
+    - path: "internal/crypto/oidc_crypto_key.go"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "OIDCCryptoKey type references 'key' and 'secret' in names — no hardcoded values."
+
+    - path: "internal/aws/secrets/client.go"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "Secrets Manager client wrapper — variable names trigger keyword pattern, no hardcoded credentials."
+
+    - path: "internal/api/app_secret.go"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "ClientSecret type contains the word 'secret' in its name and field references — no hardcoded values."
+
+    - path: "internal/api/app_handlers.go"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "Handler references ClientSecret field by name — no hardcoded credentials."
+
+    - path: "internal/api/router_test.go"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "Test helper builds a synthetic secret value for unit testing — fixture data, not a real credential."
+
+    - path: "internal/crypto/pairwise_test.go"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "Unit test fixture referencing 'secret' field name — not a real credential."
+
+    - path: "internal/middleware/edge_test.go"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "Unit test for edge-auth middleware uses a synthetic secret fixture — not a real credential."
+
+    - path: "internal/service/onboarding/service_test.go"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "Onboarding unit test uses synthetic client secret fixture — not a real credential."
+
+    - path: "scripts/smoke-onboarding.sh"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "Shell variable named 'CLIENT_SECRET' holds a value read from a parameter — no hardcoded credential."
+
+    - path: "frontend/src/pages/AppDetailPage.tsx"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "UI component renders a 'clientSecret' field label — no hardcoded credential."
+
+    - path: "internal/api/app_handlers_test.go"
+      rule_id: "SECRET-HEX-HIGH-ENTROPY-STRING"
+      reason: "Hex string is a test fixture (synthetic token/key for unit tests) — not a real credential."
+
+    - path: "internal/api/debug_handlers_test.go"
+      rule_id: "SECRET-BASE64-HIGH-ENTROPY-STRING"
+      reason: "Base64 string is a test fixture for unit tests — not a real credential."
+
+    - path: "internal/api/router_test.go"
+      rule_id: "SECRET-BASIC-AUTH-CREDENTIALS"
+      reason: "Test router encodes a synthetic Basic Auth header for unit testing — not a real credential."
+
+    - path: "internal/oidc/storage_test.go"
+      rule_id: "SECRET-BASE64-HIGH-ENTROPY-STRING"
+      reason: "OIDC storage unit test uses a synthetic base64-encoded key fixture — not a real credential."
+
+    - path: "scripts/browser-e2e/node_modules/**"
+      rule_id: "SECRET-BASE64-HIGH-ENTROPY-STRING"
+      reason: "Playwright internals contain base64-encoded resources (icons, certificates) — not credentials."
+
+    - path: "scripts/browser-e2e/node_modules/**"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "Playwright TypeScript typedefs reference 'secret' fields in their API surface — not credentials."
+
+    - path: "internal/cognito/auth_test.go"
+      rule_id: "SECRET-JSON-WEB-TOKEN"
+      reason: "Unit test fixture JWT (synthetic token for testing token validation logic) — not a real credential."
+
+    - path: "internal/iac/templates/testdata/**"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "Terraform template testdata fixtures use 'secret' as a placeholder label — not real credentials."
+
+    ###########################################################################
+    # CHECKOV — CKV_AWS_309: API GatewayV2 route authorization type
+    #
+    # This check requires authorization_type to be one of AWS_IAM, CUSTOM, or
+    # JWT. The 24 public-facing routes (SAML SSO/SLO, OIDC, health, metadata,
+    # discovery) intentionally use "NONE" because:
+    #   - SAML and OIDC authentication happens at the application layer, not
+    #     at API Gateway. The Lambda handler validates SAML assertions, OIDC
+    #     tokens, and session cookies itself.
+    #   - Discovery endpoints (/.well-known, /keys) are public by design.
+    #   - The management API (/api/v1/{proxy+}) uses JWT — this is the only
+    #     route that carries privileged authorization and it is already protected.
+    # Using authorization_type = "NONE" is the correct Terraform value for
+    # routes with no API-GW-level auth; the check's intent (no forgotten routes)
+    # is satisfied by the exhaustive explicit declarations on every route.
+    ###########################################################################
+    - path: "infra/gateway/api_gateway.tf"
+      rule_id: "CKV_AWS_309"
+      reason: "Public SAML/OIDC/discovery routes intentionally use NONE — authentication is enforced at the application layer. The management API route uses JWT and is not suppressed."
+
+    ###########################################################################
+    # CHECKOV — CKV_AWS_309: Demo app API GW routes (demo_apps.tf)
+    ###########################################################################
+    - path: "infra/demo/demo_apps.tf"
+      rule_id: "CKV_AWS_309"
+      reason: "Demo application routes — reference deployment, not production. Same reasoning as gateway routes."
+
+    ###########################################################################
+    # CHECKOV — CKV_TF_1: Module source commit hash pinning
+    #
+    # CKV_TF_1 requires all module source references to use a full commit SHA
+    # rather than a version tag or branch. This project uses semantic version
+    # constraints (e.g. "~> 7.1") on registry modules, which is the recommended
+    # Terraform Registry pattern and provides equivalent reproducibility via the
+    # .terraform.lock.hcl file. Pinning to commit SHAs would break the standard
+    # Terraform module registry workflow and version-range upgrade tooling.
+    ###########################################################################
+    - path: "infra/**/*.tf"
+      rule_id: "CKV_TF_1"
+      reason: "Module version pinned via semantic version constraint + .terraform.lock.hcl — commit SHA pinning is not required for Terraform Registry modules."
+
+    ###########################################################################
+    # CHECKOV — CloudFront hardening controls (infra/gateway/frontend.tf)
+    #
+    # These controls require non-trivial additional infrastructure (secondary
+    # origin, S3 access-log bucket, geo-restriction policy, Log4j WAF rule) and
+    # are tracked for a future hardening pass. The gateway WAF already applies
+    # managed rule groups; these are incremental improvements, not blocking gaps.
+    ###########################################################################
+    - path: "infra/gateway/frontend.tf"
+      rule_id: "CKV_AWS_86"
+      reason: "CloudFront access logging requires a dedicated S3 bucket — deferred to hardening pass."
+
+    - path: "infra/gateway/frontend.tf"
+      rule_id: "CKV_AWS_374"
+      reason: "Geo-restriction is a business policy decision — not enabled for this global deployment."
+
+    - path: "infra/gateway/frontend.tf"
+      rule_id: "CKV_AWS_310"
+      reason: "Origin failover requires a secondary origin — not in scope for this single-region deployment."
+
+    - path: "infra/gateway/frontend.tf"
+      rule_id: "CKV2_AWS_47"
+      reason: "Log4j AMR WAF rule is additive — WAF already applies AWSManagedRulesKnownBadInputsRuleSet; full AMR set deferred to WAF hardening pass."
+
+    - path: "infra/gateway/frontend.tf"
+      rule_id: "CKV2_AWS_42"
+      reason: "Custom SSL certificate is conditional on var.custom_domain — default CloudFront cert is used when no custom domain is configured."
+
+    ###########################################################################
+    # CHECKOV — Demo and example infrastructure
+    #
+    # infra/demo/ and examples/ are reference deployments for documentation
+    # purposes, not production systems. Checkov findings here do not affect the
+    # production identity gateway.
+    ###########################################################################
+    - path: "infra/demo/**"
+      reason: "Demo application infrastructure — reference deployment for documentation, not production. Checkov findings tracked separately."
+
+    - path: "examples/**"
+      reason: "Example code for documentation purposes — not a production deployment."
+
+    ###########################################################################
+    # CHECKOV — IAC template testdata
+    ###########################################################################
+    - path: "internal/iac/templates/testdata/**"
+      rule_id: "CKV2_AWS_57"
+      reason: "Terraform testdata fixture — SM secret in test template has no rotation because it is test-only infrastructure, not a real secret store."
+
+    ###########################################################################
+    # SEMGREP — Open redirect in OIDC and SAML handlers
+    #
+    # The redirect destinations in login.go and slo.go are server-controlled:
+    # they are constructed from h.baseURL + a known path, or validated against
+    # an explicit allowlist before use. These are not user-controlled redirects.
+    # Inline // nosemgrep annotations are already present in both files.
+    ###########################################################################
+    - path: "internal/oidc/login.go"
+      rule_id: "go.lang.security.injection.open-redirect.open-redirect"
+      reason: "Redirect destinations are server-controlled (h.baseURL + fixed path) or validated against an allowlist — not a user-controlled open redirect."
+
+    - path: "internal/saml/slo.go"
+      rule_id: "go.lang.security.injection.open-redirect.open-redirect"
+      reason: "SLO redirect target is a server-constructed URL derived from the registered SP configuration — not a user-controlled open redirect."
+
+    ###########################################################################
+    # SEMGREP — Unsafe deserialization in TUI debug client
+    #
+    # internal/tui/client.go is an interactive debug/development tool (terminal
+    # UI) used only by operators to inspect the running service. It is not part
+    # of the production request-handling path and is excluded from the Lambda
+    # build. The deserialization concern does not apply to a trusted, operator-
+    # only tool.
+    ###########################################################################
+    - path: "internal/tui/client.go"
+      rule_id: "go.lang.security.deserialization.unsafe-deserialization-interface.go-unsafe-deserialization-interface"
+      reason: "TUI is an operator debug tool, not part of the production Lambda binary. Deserialization of trusted operator responses is acceptable in this context."
+
+    ###########################################################################
+    # SEMGREP — Open redirect in custom-ui example
+    ###########################################################################
+    - path: "examples/custom-ui/**"
+      rule_id: "javascript.browser.security.open-redirect.js-open-redirect"
+      reason: "Example/documentation code — not production. The pattern in LoginPage.tsx redirects to a server-provided URL after authentication, which is intentional."

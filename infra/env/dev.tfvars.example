@@ -1,0 +1,23 @@
+# Copy to dev.tfvars and fill in your values. dev.tfvars is gitignored.
+environment           = "dev"
+owner                 = "your-team-or-alias"
+aws_region            = "us-east-1"
+alert_email           = "[email protected]"
+image_tag             = "latest"
+log_level             = "info"
+
+# Optional custom DNS. Leave dns_zone_name / custom_domain empty to use the
+# default API Gateway URL (no Route53 records are created).
+dns_zone_name         = ""
+demo_subdomain_prefix = "fedgw"
+custom_domain         = ""
+saml_entity_id        = "https://gateway.example.com"
+
+# Additional tags applied to every resource via the provider default_tags.
+# Leave empty for none.
+additional_tags = {}
+
+# Optional: send Cognito emails via SES using a verified identity as the From
+# address. Leave empty to use the default Cognito email sender (rate-limited,
+# testing only).
+ses_from_email_address = ""

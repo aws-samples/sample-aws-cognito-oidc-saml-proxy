@@ -1,0 +1,99 @@
+# Pre-commit hooks — fast local mirror of the .gitlab-ci.yml gates so failures
+# surface before a push instead of in the MR pipeline. Install once with:
+#   pipx install pre-commit   # or: pip install pre-commit
+#   pre-commit install
+# Run against everything on demand:
+#   pre-commit run --all-files
+#
+# Heavy CI gates (go test -race, govulncheck, ASH, GitLab SAST) are intentionally
+# NOT duplicated here — they belong in CI. These hooks cover the cheap checks
+# that catch the mistakes that most often break the pipeline locally.
+
+minimum_pre_commit_version: "3.5.0"
+fail_fast: false
+
+repos:
+  # --- Generic hygiene -----------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Preserve intentional trailing whitespace in Markdown line breaks.
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: check-json
+      - id: detect-private-key
+      # Blocks accidental commits of build artifacts / vendored deps such as the
+      # 18 MB scripts/browser-e2e/node_modules tree.
+      - id: check-added-large-files
+        args: [--maxkb=512]
+
+  # --- Terraform -----------------------------------------------------------
+  # Mirrors CI's `terraform -chdir=infra fmt -check -recursive`. `fmt` here
+  # rewrites files in place so the commit is already formatted.
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.99.4
+    hooks:
+      - id: terraform_fmt
+      - id: terraform_validate
+        # Split topology: three independent roots. Validate each without a
+        # backend (parity with the CI loop over registry/gateway/demo).
+        args:
+          - --init-args=-backend=false
+        exclude: ^infra/env/
+
+  # --- Go ------------------------------------------------------------------
+  # Local hooks use the repo's own Go toolchain rather than pinning a container,
+  # so they track go.mod's version. gofmt+vet are the cheap gates; build/test
+  # stay in CI.
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -l -w
+        language: system
+        types: [go]
+        pass_filenames: true
+      - id: go-vet
+        name: go vet
+        entry: bash -c 'go vet ./...'
+        language: system
+        types: [go]
+        pass_filenames: false
+
+  # --- Secret detection ----------------------------------------------------
+  # Mirrors CI's Secret-Detection / gitleaks layer. Runs on the staged diff.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # --- Deployment-value leak guard ----------------------------------------
+  # Encodes the check from the old scripts/push-branch.sh: no deployment-specific
+  # values (CloudFront/Cognito hosts, 12-digit account IDs, client-id prefixes)
+  # may be committed. Example .tfvars/.backend.hcl carry these legitimately and
+  # are excluded.
+  - repo: local
+    hooks:
+      - id: no-deployment-values
+        name: no deployment-specific values
+        entry: >-
+          bash -c '
+          if git diff --cached -U0 -- "$@" | grep -nE "^\+" |
+             grep -nE "cloudfront\.net|amazoncognito\.com|[0-9]{12}|demo-oidc-[0-9]|fed-gw-"; then
+            echo "ERROR: staged changes contain deployment-specific values (CloudFront/Cognito host, account id, client id).";
+            exit 1;
+          fi' --
+        language: system
+        pass_filenames: true
+        exclude: |
+          (?x)^(
+            \.pre-commit-config\.yaml|
+            .*\.example|
+            infra/env/.*\.(tfvars|backend\.hcl)
+          )$

@@ -1,0 +1,110 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Identity Gateway cross-account role + Cognito app client + Secrets Manager secret for tenant acme
+
+Parameters:
+  ExternalId:
+    Type: String
+    Description: Identity Gateway-generated shared secret for confused-deputy protection. Copy from the onboarding wizard.
+    NoEcho: true
+    MinLength: 32
+    MaxLength: 64
+    AllowedPattern: "^[A-Z2-7]+$"
+  UserPoolId:
+    Type: String
+    Description: The tenant Cognito user pool id (e.g. eu-north-1_AbC123xyz). Scopes the cognito-idp permissions to this pool — never widen to "*".
+    AllowedPattern: "^[\\w-]+_[0-9a-zA-Z]+$"
+
+Resources:
+  GatewayKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Encrypts the Cognito client secret used by Identity Gateway (tenant acme)
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAccountRoot
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          - Sid: AllowGatewayRole
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt GatewayRole.Arn
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:GenerateDataKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                kms:ViaService: !Sub secretsmanager.${AWS::Region}.amazonaws.com
+
+  GatewaySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub identity-gateway-${AWS::Region}-acme-cognito-secret
+      Description: Cognito app client secret consumed by Identity Gateway
+      KmsKeyId: !Ref GatewayKMSKey
+      Tags:
+        - Key: IdentityGatewayTenant
+          Value: "acme"
+
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: identity-gateway-acme
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::111122223333:role/identity-gateway-management-api
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      Tags:
+        - Key: IdentityGatewayTenant
+          Value: "acme"
+      Policies:
+        - PolicyName: identity-gateway-core
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CognitoDescribe
+                Effect: Allow
+                Action:
+                  - cognito-idp:DescribeUserPool
+                  - cognito-idp:DescribeUserPoolClient
+                  - cognito-idp:DescribeUserPoolDomain
+                  - cognito-idp:ListIdentityProviders
+                Resource: !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}
+              - Sid: SecretRead
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref GatewaySecret
+              - Sid: KMSDecrypt
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:GenerateDataKey
+                Resource: !GetAtt GatewayKMSKey.Arn
+              - Sid: SelfSimulate
+                Effect: Allow
+                Action: iam:SimulatePrincipalPolicy
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/identity-gateway-acme
+
+Outputs:
+  RoleArn:
+    Description: Paste this into the onboarding wizard (Step 4)
+    Value: !GetAtt GatewayRole.Arn
+  SecretArn:
+    Description: Paste this into the onboarding wizard (Step 4)
+    Value: !Ref GatewaySecret
+  KmsKeyArn:
+    Description: KMS CMK encrypting the Cognito client secret
+    Value: !GetAtt GatewayKMSKey.Arn

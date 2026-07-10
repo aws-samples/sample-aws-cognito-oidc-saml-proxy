@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions in .github/workflows current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  # Root Go module (the proxy service).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  # Demo relying-party app module.
+  - package-ecosystem: gomod
+    directory: /scripts/test-rp
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  # Demo service-provider app module.
+  - package-ecosystem: gomod
+    directory: /scripts/test-sp
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

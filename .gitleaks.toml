@@ -1,0 +1,57 @@
+# gitleaks configuration for sample-aws-cognito-oidc-saml-proxy
+#
+# Extends the gitleaks default ruleset and allowlists a small set of reviewed
+# false positives. Every entry below has been manually triaged; none of these
+# are real secrets. See scan-results/SUMMARY.md for the full security review
+# context (prepared for the AppSec Public Content Security Review).
+#
+# NOTE: allowlists are evaluated against every commit at scan time, so they
+# clear findings from git *history* as well as the current tree.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Reviewed false positives (test fixtures, example UI strings) and gitignored build/state artifacts that are never published."
+
+# Path-based allowlist. Paths are regexes matched against the file path.
+paths = [
+  # --- Reviewed false positives in tracked (published) content ---
+
+  # Go test fixtures use the well-known public jwt.io example token
+  # (signed with the documented "your-256-bit-secret") plus dummy values
+  # like "the-secret" / "client-id-123". No real credentials.
+  '''internal/cognito/auth_test\.go''',
+  # Example ARNs using the AWS documentation account 111122223333 and the
+  # Secrets Manager "-AB1234" random suffix. Not real resources.
+  '''internal/aws/iam/prober_test\.go''',
+  '''internal/api/app_handlers_test\.go''',
+  # Cloudscape DateRangePicker option `key:` fields (e.g. 'previous-7-days')
+  # and table/filter i18n strings. UI labels, not credentials.
+  '''frontend/src/pages/AnalyticsPage\.tsx''',
+  '''frontend/src/pages/AuditLogPage\.tsx''',
+
+  # --- Gitignored artifacts: never committed / never published ---
+  # Defensive: excluded so a local `gitleaks dir` scan stays clean too.
+  '''\.local-dev-signing-key\.pem$''',
+  '''(^|/)infra/terraform\.tfstate.*''',
+  '''(^|/)infra/\.terraform/.*''',
+  '''(^|/)frontend/dist/.*''',
+  '''(^|/)node_modules/.*''',
+  '''(^|/)docs/superpowers/.*''',
+]
+
+# Regex-based allowlist for the specific public example JWT so it is ignored
+# wherever it appears (docs, tests) without disabling the jwt rule globally.
+regexes = [
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxMjM0NTY3ODkwI.*''',
+]
+
+[[allowlists]]
+description = "OpenAPI title/version literal in cmd/proxy/main.go — the string \"SAML Proxy Management API\", \"1.0.0\" passed to NewHumaAPI is a Huma API title/version, not a credential."
+# Match against the whole source line so this stays robust regardless of which
+# generic-api-key variant a given gitleaks build uses.
+regexTarget = "line"
+regexes = [
+  '''NewHumaAPI\(router,''',
+]
