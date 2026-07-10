@@ -1,4 +1,4 @@
-.PHONY: build test test-integration test-e2e lint clean docker-build fmt vet frontend-install frontend-build frontend-deploy frontend-dev frontend-lint generate-types build-all lint-all build-all-lambdas docker-build-all security-scan security-scan-strict registry-init registry-apply push-function-images push-demo-images gateway-init gateway-apply demo-init demo-apply deploy-dev tf-init tf-plan tf-validate
+.PHONY: build test test-integration test-e2e lint clean docker-build fmt vet frontend-install frontend-build frontend-deploy frontend-dev frontend-lint generate-types build-all lint-all build-all-lambdas docker-build-all security-scan security-scan-strict registry-init registry-apply push-function-images push-demo-images gateway-init gateway-apply demo-init demo-apply deploy-dev registry-destroy gateway-destroy demo-destroy destroy-dev tf-init tf-plan tf-validate
 
 BINARY_NAME := proxy
 BUILD_DIR := bin
@@ -241,6 +241,52 @@ deploy-dev:
 	$(MAKE) demo-apply AWS_PROFILE=$(AWS_PROFILE) ENV=$(ENV)
 	$(MAKE) frontend-deploy AWS_PROFILE=$(AWS_PROFILE) ENV=$(ENV)
 	@echo "==> deploy-dev complete. Next: post-install (admin user, tenant, register SAML+OIDC apps), then E2E."
+
+# ---------------------------------------------------------------------------
+# Teardown (reverse of deploy: demo -> gateway -> registry)
+#
+# Destroy order is the strict reverse of the apply order. The demo and gateway
+# stacks read the registry stack via remote_state, so the registry stack MUST be
+# destroyed LAST. Each target re-runs `init` so teardown works from a clean shell
+# (e.g. a fresh clone with only the S3 backend configured).
+#
+# Two teardown snags this handles automatically:
+#   - The gateway's frontend + IaC-template S3 buckets are NOT force_destroy, so
+#     a non-empty bucket blocks `terraform destroy`. gateway-destroy empties both
+#     (names read from Terraform outputs) before destroying.
+#   - ECR repos use repository_force_delete in non-prod (var.environment != prod),
+#     so pushed images are removed automatically — no manual purge needed.
+#
+# CloudFront can be slow to disassociate; if a WAF web ACL deletion fails because
+# CloudFront is still tearing down, re-run the same target a few minutes later.
+# ---------------------------------------------------------------------------
+
+demo-destroy:
+	AWS_PROFILE=$(AWS_PROFILE) terraform -chdir=infra/demo init $(call tf_backend_config,demo)
+	AWS_PROFILE=$(AWS_PROFILE) terraform -chdir=infra/demo destroy -var-file=$(TFVARS) -auto-approve
+
+gateway-destroy:
+	AWS_PROFILE=$(AWS_PROFILE) terraform -chdir=infra/gateway init $(call tf_backend_config,gateway)
+	@for out in frontend_bucket_name iac_templates_bucket_name; do \
+		B=$$(AWS_PROFILE=$(AWS_PROFILE) terraform -chdir=infra/gateway output -raw $$out 2>/dev/null); \
+		if [ -n "$$B" ]; then \
+			echo "==> Emptying s3://$$B before destroy"; \
+			aws s3 rm s3://$$B --recursive --profile $(AWS_PROFILE) --region $(AWS_REGION) >/dev/null 2>&1 || true; \
+		fi; \
+	done
+	AWS_PROFILE=$(AWS_PROFILE) terraform -chdir=infra/gateway destroy -var-file=$(TFVARS) -auto-approve
+
+registry-destroy:
+	AWS_PROFILE=$(AWS_PROFILE) terraform -chdir=infra/registry init $(call tf_backend_config,registry)
+	AWS_PROFILE=$(AWS_PROFILE) terraform -chdir=infra/registry destroy -var-file=$(TFVARS) -auto-approve
+
+# Full ordered teardown — the mirror image of deploy-dev. Sub-invokes each step
+# via $(MAKE) so the demo -> gateway -> registry ordering holds regardless of -j.
+destroy-dev:
+	$(MAKE) demo-destroy AWS_PROFILE=$(AWS_PROFILE) ENV=$(ENV)
+	$(MAKE) gateway-destroy AWS_PROFILE=$(AWS_PROFILE) ENV=$(ENV)
+	$(MAKE) registry-destroy AWS_PROFILE=$(AWS_PROFILE) ENV=$(ENV)
+	@echo "==> destroy-dev complete. All three stacks torn down."
 
 # Per-stack plan/validate helpers. STACK defaults to gateway; override e.g.
 # `make tf-plan STACK=demo`.
