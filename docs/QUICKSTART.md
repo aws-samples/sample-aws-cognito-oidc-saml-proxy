@@ -274,14 +274,28 @@ For shared/team use, store Terraform state in S3 instead of locally:
 
 ## Teardown
 
+Tear everything down with the centralized target (mirror of `make deploy-dev`,
+destroys in reverse order: demo → gateway → registry):
+
 ```bash
-cd infra
-terraform destroy -var-file=env/$ENV.tfvars
+make destroy-dev ENV=$ENV AWS_PROFILE=$AWS_PROFILE
 ```
 
-> ECR repos use `force_delete` in non-prod, so images are removed automatically. If a WAF
-> web ACL is slow to delete because CloudFront is still disassociating, re-run `destroy` a
-> few minutes later.
+Or destroy a single stack at a time (same reverse order):
+
+```bash
+make demo-destroy ENV=$ENV
+make gateway-destroy ENV=$ENV   # empties the frontend + IaC-template buckets first
+make registry-destroy ENV=$ENV  # must be last: other stacks read it via remote_state
+```
+
+> The infra is split into three independently-stated stacks (`infra/registry`,
+> `infra/gateway`, `infra/demo`), so there is no single root to destroy — use the
+> targets above. `make gateway-destroy` empties the frontend and IaC-template S3
+> buckets before destroying, since neither sets `force_destroy`. ECR repos use
+> `repository_force_delete` in non-prod, so images are removed automatically. If a
+> WAF web ACL is slow to delete because CloudFront is still disassociating, re-run
+> the same target a few minutes later.
 
 ## Troubleshooting
 

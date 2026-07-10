@@ -16,7 +16,7 @@ help:
 	@echo "  dev            Run the SPA locally (npm run dev) — needs frontend/.env.local"
 	@echo "  frontend-build Build the SPA (frontend/dist)"
 	@echo "  deploy         terraform apply -> sync assets to S3 -> invalidate CloudFront"
-	@echo "  destroy        terraform destroy"
+	@echo "  destroy        empty the SPA bucket -> terraform destroy"
 
 dev:
 	cd frontend && npm install && npm run dev
@@ -46,8 +46,17 @@ invalidate:
 
 deploy: frontend-build tf-apply sync invalidate
 
+# Empty the private SPA bucket first — it is not force_destroy, so Terraform
+# cannot delete it while the synced assets remain. The bucket name comes from
+# the Terraform output; the step is a no-op if state/bucket is already gone.
 destroy:
-	cd infra && terraform destroy -input=false
+	cd infra && \
+	  BUCKET=$$(terraform output -raw bucket_name 2>/dev/null) && \
+	  if [ -n "$$BUCKET" ]; then \
+	    echo "Emptying s3://$$BUCKET before destroy"; \
+	    aws s3 rm s3://$$BUCKET --recursive --region $(AWS_REGION) >/dev/null 2>&1 || true; \
+	  fi; \
+	  terraform destroy -input=false -auto-approve
 
 clean:
 	rm -rf frontend/dist

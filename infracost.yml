@@ -1,0 +1,30 @@
+# Infracost configuration for the split-stack Terraform layout.
+#
+# Generate a combined monthly estimate across all three stacks with:
+#   infracost breakdown --config-file infracost.yml
+#
+# Requires:
+#   - infracost CLI          https://www.infracost.io/docs/#quick-start
+#   - INFRACOST_API_KEY      free, via `infracost auth login`
+#   - env/dev.tfvars         the same var-file used by `make deploy-dev`
+#
+# Var-file paths are relative to each project's `path`. The gateway/demo stacks
+# read the registry stack via remote_state; Infracost treats those unknown
+# outputs as non-cost-affecting, so per-stack estimates are still produced.
+version: "0.1"
+
+projects:
+  - path: infra/registry
+    name: registry
+    terraform_var_files:
+      - ../env/dev.tfvars
+
+  - path: infra/gateway
+    name: gateway
+    terraform_var_files:
+      - ../env/dev.tfvars
+
+  - path: infra/demo
+    name: demo
+    terraform_var_files:
+      - ../env/dev.tfvars
