@@ -185,6 +185,29 @@ jobs:
           path: .ash/ash_output/
           if-no-files-found: warn
 
+  integration-e2e:
+    name: Integration & E2E tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      # The integration and e2e suites live behind the `integration` / `e2e`
+      # build tags to keep the default unit run fast. They are fully
+      # self-contained — in-memory stores plus mock KMS and a mock Cognito
+      # server over httptest, with no AWS credentials or deployed environment
+      # required — so they run on every PR and catch regressions in the
+      # SAML/OIDC flows (including from dependency bumps) that the unit tests
+      # alone would miss.
+      - name: Integration tests
+        run: make test-integration
+
+      - name: E2E tests
+        run: make test-e2e
+
   demo-app-build:
     name: Demo apps build
     runs-on: ubuntu-latest
