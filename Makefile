@@ -1,4 +1,4 @@
-.PHONY: build test test-integration test-e2e lint clean docker-build fmt vet frontend-install frontend-build frontend-deploy frontend-dev frontend-lint generate-types build-all lint-all build-all-lambdas docker-build-all security-scan security-scan-strict registry-init registry-apply push-function-images push-demo-images gateway-init gateway-apply demo-init demo-apply deploy-dev registry-destroy gateway-destroy demo-destroy destroy-dev tf-init tf-plan tf-validate
+.PHONY: build test test-integration test-e2e lint clean docker-build fmt vet frontend-install frontend-build frontend-deploy frontend-dev frontend-lint generate-types build-all lint-all build-all-lambdas docker-build-all security-scan security-scan-strict registry-init registry-apply push-function-images push-demo-images gateway-init gateway-apply demo-init demo-apply deploy-dev registry-destroy gateway-destroy demo-destroy destroy-dev post-install tf-init tf-plan tf-validate
 
 BINARY_NAME := proxy
 BUILD_DIR := bin
@@ -11,6 +11,9 @@ FUNCTIONS := saml-sso saml-slo saml-metadata oidc-authorize oidc-token oidc-disc
 # config file (infra/env/<stack>.$(ENV).backend.hcl). Override e.g. `make
 # deploy-dev ENV=staging`.
 ENV ?= dev
+# Cognito username (email) to grant console admin access in `post-install`.
+# Leave empty to skip the group assignment (the cert seed still runs).
+ADMIN_EMAIL ?=
 # Terraform var-file, relative to each stack dir under infra/ (all three stacks
 # read the same env inputs via their symlinked variables.tf).
 TFVARS := ../env/$(ENV).tfvars
@@ -287,6 +290,47 @@ destroy-dev:
 	$(MAKE) gateway-destroy AWS_PROFILE=$(AWS_PROFILE) ENV=$(ENV)
 	$(MAKE) registry-destroy AWS_PROFILE=$(AWS_PROFILE) ENV=$(ENV)
 	@echo "==> destroy-dev complete. All three stacks torn down."
+
+# ---------------------------------------------------------------------------
+# Post-install — one-time bootstrap that `deploy-dev` intentionally leaves out
+# because it is account/operator-specific. Run once after a fresh deploy:
+#   make post-install ENV=dev AWS_PROFILE=<profile> ADMIN_EMAIL=you@example.com
+#
+# It does two things, both idempotent:
+#   1. Seeds the SAML signing certificate. Only the saml-sso Lambda self-
+#      bootstraps it (on first cold start); management-api and saml-metadata are
+#      read-only and exit if it is missing — so opening the console before any
+#      SSO traffic yields 500s. Invoking saml-sso once creates + persists the
+#      cert to DynamoDB. (If a cert already exists, saml-sso reuses it.)
+#   2. Adds ADMIN_EMAIL to the Cognito "Admins" group. A freshly created user is
+#      in no group, and the management API requires Admins/Operators for every
+#      operation (403 otherwise). Re-adding an existing member is a no-op.
+#
+# Function name + user-pool id are read from Terraform outputs, so this tracks
+# var.name_suffix automatically. Requires the gateway stack to be applied.
+post-install:
+	@SSO_FN=$$(AWS_PROFILE=$(AWS_PROFILE) terraform -chdir=infra/gateway output -json lambda_function_names 2>/dev/null | jq -r '."saml-sso" // empty'); \
+	POOL=$$(AWS_PROFILE=$(AWS_PROFILE) terraform -chdir=infra/gateway output -raw cognito_user_pool_id 2>/dev/null); \
+	if [ -z "$$SSO_FN" ] || [ -z "$$POOL" ]; then \
+		echo "ERROR: could not read gateway outputs (lambda_function_names / cognito_user_pool_id)."; \
+		echo "       Apply the gateway stack first (make gateway-apply ENV=$(ENV))."; \
+		exit 1; \
+	fi; \
+	echo "==> Seeding SAML signing certificate (invoking $$SSO_FN)"; \
+	AWS_PROFILE=$(AWS_PROFILE) aws lambda invoke --region $(AWS_REGION) \
+		--function-name "$$SSO_FN" --payload '{}' --cli-binary-format raw-in-base64-out /dev/null >/dev/null \
+		&& echo "    signing certificate ready." || { echo "ERROR: saml-sso invocation failed."; exit 1; }; \
+	if [ -n "$(ADMIN_EMAIL)" ]; then \
+		echo "==> Adding $(ADMIN_EMAIL) to the Admins group (pool $$POOL)"; \
+		AWS_PROFILE=$(AWS_PROFILE) aws cognito-idp admin-add-user-to-group --region $(AWS_REGION) \
+			--user-pool-id "$$POOL" --username "$(ADMIN_EMAIL)" --group-name Admins \
+			&& echo "    added. Sign out and back in so the new token carries the cognito:groups claim."; \
+	else \
+		echo "==> ADMIN_EMAIL not set — skipping Admins group assignment."; \
+		echo "    Grant console access later with:"; \
+		echo "    make post-install ENV=$(ENV) AWS_PROFILE=$(AWS_PROFILE) ADMIN_EMAIL=you@example.com"; \
+	fi
+	@echo "==> post-install complete."
 
 # Per-stack plan/validate helpers. STACK defaults to gateway; override e.g.
 # `make tf-plan STACK=demo`.

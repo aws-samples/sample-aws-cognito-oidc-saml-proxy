@@ -9,12 +9,16 @@ module "sns_alerts" {
   name         = "${local.name_prefix}-alerts"
   display_name = "${local.name_prefix} Operational Alerts"
 
-  subscriptions = {
+  # Only create the email subscription when an address is configured. An empty
+  # alert_email (common for sandbox/dev deploys) skips it rather than failing the
+  # whole apply with an SNS "Invalid parameter: Email address" error. The topic
+  # is still created so CloudWatch alarm_actions remain valid.
+  subscriptions = var.alert_email != "" ? {
     email = {
       protocol = "email"
       endpoint = var.alert_email
     }
-  }
+  } : {}
 
   tags = {
     Component = "monitoring"
