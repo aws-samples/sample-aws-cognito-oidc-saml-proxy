@@ -1,10 +1,21 @@
 # Copy to dev.tfvars and fill in your values. dev.tfvars is gitignored.
 environment           = "dev"
 owner                 = "your-team-or-alias"
-aws_region            = "us-east-1"
-alert_email           = "[email protected]"
+aws_region            = "us-east-1" # region the project's RESOURCES deploy into
 image_tag             = "latest"
 log_level             = "info"
+
+# Terraform remote-state backend. Must match the bucket in your
+# <stack>.<env>.backend.hcl files; the gateway/demo stacks read the registry
+# stack's outputs from here via terraform_remote_state. Create this bucket
+# before `terraform init` (Terraform cannot bootstrap its own backend).
+state_bucket        = "tf-state-<YOUR_AWS_ACCOUNT_ID>-us-east-1"
+state_bucket_region = "us-east-1" # bucket region; may differ from aws_region
+
+# Email for operational alerts (SNS). Must be a real, deliverable address — you
+# will get a confirmation link to click. Leave EMPTY to skip the subscription
+# entirely (recommended for throwaway sandbox/dev deploys).
+alert_email = ""
 
 # Optional custom DNS. Leave dns_zone_name / custom_domain empty to use the
 # default API Gateway URL (no Route53 records are created).

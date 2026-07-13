@@ -175,6 +175,18 @@ cd infra && terraform output -raw cloudfront_domain_name && cd ..
 
 Terraform does **not** seed an admin user or a tenant — you create the first ones here.
 
+> **Signing certificate (required, or the console 500s):** the `management-api` and
+> `saml-metadata` Lambdas read the SAML signing certificate at startup and exit if it is
+> missing. Only the `saml-sso` Lambda creates it, on its first cold start. On a fresh deploy
+> the cert does not exist yet, so opening the console before any SSO traffic returns **500**
+> on every DB-backed call. Invoke `saml-sso` once to seed it (any SAML SSO flow also works).
+
+> **Shortcut:** after the stacks are up, run
+> `make post-install ENV=$ENV AWS_PROFILE=$AWS_PROFILE ADMIN_EMAIL=you@example.com`.
+> It seeds the signing certificate (above) and adds your user to the `Admins` group — the two
+> bootstrap steps that otherwise cause 500s (missing cert) then 403s (missing group). Both are
+> idempotent. You still create the tenant (8c) and identity source/app (8d–8e) yourself.
+
 ### 8a. Create your first admin user
 
 The Cognito pool is admin-create-only, so create the user via the CLI, give it a permanent
@@ -182,7 +194,7 @@ password (no email needed), set its tenant, and add it to the `Admins` group. Pi
 slug now (e.g. `acme`) — it must match the tenant you create in 8c.
 
 ```bash
-POOL=$(cd infra && terraform output -raw cognito_user_pool_id)
+POOL=$(terraform -chdir=infra/gateway output -raw cognito_user_pool_id)
 ADMIN_EMAIL="admin@example.com"
 TENANT_SLUG="acme"
 
@@ -212,7 +224,7 @@ Create a tenant whose **slug matches** the `custom:tenant_id` you set (`acme`). 
 this from the console's tenant management, or via the API:
 
 ```bash
-API=$(cd infra && terraform output -raw api_endpoint)
+API=$(terraform -chdir=infra/gateway output -raw api_endpoint)
 # Obtain an admin access token (e.g. via the console session) and:
 curl -X POST "$API/api/v1/tenants" -H "Authorization: Bearer <ADMIN_ID_TOKEN>" \
   -H "Content-Type: application/json" \
