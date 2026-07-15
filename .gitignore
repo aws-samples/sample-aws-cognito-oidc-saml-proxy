@@ -93,3 +93,6 @@ scan-results/
 # ASH (Automated Security Helper) output — CI regenerates this as a job
 # artifact; never commit the local scan tree.
 .ash/
+
+# MkDocs build output
+site/

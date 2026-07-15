@@ -4,12 +4,12 @@ This document describes the AWS deployment architecture of the Identity Federati
 Gateway — a multi-tenant, serverless SAML 2.0 IdP and OIDC Provider that fronts
 Amazon Cognito user pools.
 
-![Identity Federation Gateway — AWS Deployment Architecture](images/architecture.png)
+![Identity Federation Gateway — AWS Deployment Architecture](../images/architecture.png)
 
-The diagram above is generated from [`diagrams/architecture.json`](diagrams/architecture.json).
+The diagram above is generated from [`diagrams/architecture.json`](../diagrams/architecture.json).
 An editable draw.io version of the same architecture is available at
-[`diagrams/identity-federation-gateway.drawio`](diagrams/identity-federation-gateway.drawio)
-([rendered PNG](images/identity-federation-gateway.png)).
+[`diagrams/identity-federation-gateway.drawio`](../diagrams/identity-federation-gateway.drawio)
+([rendered PNG](../images/identity-federation-gateway.png)).
 The sections below describe each component shown, grouped the same way as the diagram.
 
 ## Actors
