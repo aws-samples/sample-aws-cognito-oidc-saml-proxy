@@ -11,7 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.63.0
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.57.1
 	github.com/aws/aws-sdk-go-v2/service/iam v1.54.7
-	github.com/aws/aws-sdk-go-v2/service/kms v1.50.4
+	github.com/aws/aws-sdk-go-v2/service/kms v1.54.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.104.2
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.42.5
 	github.com/aws/aws-sdk-go-v2/service/sts v1.42.0
