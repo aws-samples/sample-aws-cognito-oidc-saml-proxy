@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
+#
+# push-all-images.sh — build and push all 8 gateway Lambda images.
+#
+# Wrapper around `make push-function-images`, which tags each image with the git
+# commit (the ECR repositories are immutable) and writes every image digest to
+# infra/env/<env>.tfvars for the next `make gateway-apply`.
+#
+# Config via env: PROFILE (default), REGION (us-east-1), ENV (dev).
+#
 set -euo pipefail
-
-REG="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-1.amazonaws.com"
-TAG="latest"
-FUNCTIONS="saml-sso saml-slo saml-metadata oidc-authorize oidc-token oidc-discovery management-api health"
-
-for fn in $FUNCTIONS; do
-  repo="cognito-saml-proxy-dev-${fn}"
-  ref="${REG}/${repo}:${TAG}"
-  echo "=== ${fn}: build ${ref} ==="
-  DOCKER_BUILDKIT=0 docker build --platform linux/arm64 -t "${repo}:${TAG}" -f "cmd/${fn}/Dockerfile" bin/
-  docker tag "${repo}:${TAG}" "${ref}"
-  echo "=== ${fn}: push ==="
-  docker push "${ref}"
-  echo "${fn} OK"
-done
-echo "ALL_FUNCTION_IMAGES_PUSHED"
+cd "$(dirname "$0")/.."  # repo root
+exec make push-function-images \
+  AWS_PROFILE="${PROFILE:-default}" AWS_REGION="${REGION:-us-east-1}" ENV="${ENV:-dev}"

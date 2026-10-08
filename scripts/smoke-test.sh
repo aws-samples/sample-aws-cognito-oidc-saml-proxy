@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BASE_URL="${1:?Usage: $0 <base-url> [tenant]}"
-TENANT="${2:-demo}"
+TENANT="${2:-default}"   # the built-in tenant the gateway creates at startup
 
 echo "=== Health ==="
 curl -sf "${BASE_URL}/health" | jq .
@@ -20,7 +20,13 @@ echo "=== OpenAPI Spec ==="
 curl -sf "${BASE_URL}/openapi.json" | jq '.info.title'
 
 echo "=== Management API (expect 401 without token) ==="
-HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" "${BASE_URL}/api/v1/applications" || true)
+# `make run-local` serves the management API without auth; set EXPECT_API_STATUS=200 there.
+EXPECTED="${EXPECT_API_STATUS:-401}"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/api/v1/applications" || true)
 echo "HTTP ${HTTP_CODE}"
+if [[ "$HTTP_CODE" != "$EXPECTED" ]]; then
+  echo "FAIL: expected ${EXPECTED} from the management API without a token, got ${HTTP_CODE}" >&2
+  exit 1
+fi
 
 echo "=== All smoke tests passed ==="

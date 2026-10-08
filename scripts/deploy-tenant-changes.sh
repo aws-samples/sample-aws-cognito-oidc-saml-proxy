@@ -27,8 +27,8 @@
 #                requires typing "apply"; migration still honors MIGRATE_APPLY)
 #
 # Env:
-#   PROFILE (default), REGION (us-east-1), REG (dev ECR host), PREFIX
-#   (cognito-saml-proxy-dev), TFVARS (env/dev.tfvars), USER_POOL_ID (phase 4),
+#   PROFILE (default), REGION (us-east-1), ENV (dev), PREFIX
+#   (cognito-saml-proxy-dev), USER_POOL_ID (phase 4),
 #   MIGRATE_APPLY (false — set true to actually write user attributes).
 #
 set -euo pipefail
@@ -37,9 +37,10 @@ cd "$(dirname "$0")/.."  # repo root
 
 PROFILE="${PROFILE:-default}"
 REGION="${REGION:-us-east-1}"
-REG="${REG:-$(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-1.amazonaws.com}"
+ENV="${ENV:-dev}"
 PREFIX="${PREFIX:-cognito-saml-proxy-dev}"
-TFVARS="${TFVARS:-env/dev.tfvars}"
+# Relative to the stack directory (terraform -chdir=infra/gateway).
+TFVARS="../env/${ENV}.tfvars"
 MIGRATE_APPLY="${MIGRATE_APPLY:-false}"
 STATE_DIR="${STATE_DIR:-deploy-state}"
 
@@ -106,6 +107,8 @@ if $DO_ROLLBACK_CODE; then
       --region "$REGION" --profile "$PROFILE" --query "LastUpdateStatus" --output text
   done
   echo "Code rollback complete."
+  echo "NOTE: set image_digests in infra/env/${ENV}.tfvars to the digests above, or the"
+  echo "      next gateway apply re-deploys the images you just rolled back from."
   exit 0
 fi
 
@@ -118,14 +121,11 @@ if $DO_CODE; then
   echo "=== Phase 1: Lambda code — will rebuild and roll: ${CODE_FNS} ==="
   if confirm "Build, push, and update-function-code for these Lambdas?"; then
     mkdir -p "$STATE_DIR"
-    echo "--- ECR login (${REG}) ---"
-    aws ecr get-login-password --region "$REGION" --profile "$PROFILE" \
-      | docker login --username AWS --password-stdin "$REG"
     for fn in $CODE_FNS; do
-      repo="${PREFIX}-${fn}"; fname="${PREFIX}-${fn}"; ref="${REG}/${repo}:latest"
+      fname="${PREFIX}-${fn}"
 
       # Capture the currently-deployed image (digest-pinned) for rollback,
-      # BEFORE we overwrite the :latest tag. Skipped if the function is new.
+      # BEFORE the function moves to the new image. Skipped if it is new.
       cur="$(aws lambda get-function --function-name "$fname" \
         --region "$REGION" --profile "$PROFILE" \
         --query 'Code.ImageUri' --output text 2>/dev/null || true)"
@@ -134,15 +134,9 @@ if $DO_CODE; then
         echo "--- ${fn}: saved current image for rollback (${STATE_DIR}/${fn}.prev) ---"
       fi
 
-      echo "--- ${fn}: build binary ---"
-      CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o "bin/${fn}" "./cmd/${fn}/"
-      echo "--- ${fn}: build + push image ---"
-      DOCKER_BUILDKIT=0 docker build --platform linux/arm64 -t "${repo}:latest" -f "cmd/${fn}/Dockerfile" bin/
-      docker tag "${repo}:latest" "${ref}"
-      docker push "${ref}"
-      echo "--- ${fn}: update lambda ---"
-      aws lambda update-function-code --function-name "$fname" --image-uri "${ref}" \
-        --region "$REGION" --profile "$PROFILE" --query "LastUpdateStatus" --output text
+      # Builds, pushes under a unique immutable tag, deploys by digest, and
+      # records the digest in infra/env/${ENV}.tfvars.
+      PROFILE="$PROFILE" REGION="$REGION" ENV="$ENV" ./scripts/redeploy-function.sh "$fn"
     done
     echo "Phase 1 complete. Roll back with: ./scripts/deploy-tenant-changes.sh --rollback-code"
   else
@@ -157,7 +151,7 @@ if $DO_INFRA; then
   require terraform
   echo
   echo "=== Phase 2: Terraform — planning infra changes (var-file=${TFVARS}) ==="
-  ( cd infra && AWS_PROFILE="$PROFILE" terraform plan -var-file="$TFVARS" )
+  AWS_PROFILE="$PROFILE" terraform -chdir=infra/gateway plan -var-file="$TFVARS"
   echo
   echo "!!! REVIEW THE PLAN ABOVE CAREFULLY !!!"
   echo "Expected: API Gateway CORS (+x-tenant-id), Cognito backend-client callback"
@@ -165,7 +159,7 @@ if $DO_INFRA; then
   echo "the Cognito user pool, STOP — that destroys all users."
   read -r -p "Type 'apply' to apply this Terraform plan: " tfans
   if [[ "$tfans" == "apply" ]]; then
-    ( cd infra && AWS_PROFILE="$PROFILE" terraform apply -var-file="$TFVARS" )
+    AWS_PROFILE="$PROFILE" terraform -chdir=infra/gateway apply -var-file="$TFVARS"
     echo "Phase 2 complete."
   else
     echo "Skipped Terraform apply."
