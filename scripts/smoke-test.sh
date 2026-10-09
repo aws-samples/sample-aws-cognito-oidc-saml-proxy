@@ -20,7 +20,7 @@ echo "=== OpenAPI Spec ==="
 curl -sf "${BASE_URL}/openapi.json" | jq '.info.title'
 
 echo "=== Management API (expect 401 without token) ==="
-# `make run-local` serves the management API without auth; set EXPECT_API_STATUS=200 there.
+# A local server with auth disabled returns 200; set EXPECT_API_STATUS=200 there.
 EXPECTED="${EXPECT_API_STATUS:-401}"
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/api/v1/applications" || true)
 echo "HTTP ${HTTP_CODE}"
