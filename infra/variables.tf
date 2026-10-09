@@ -77,6 +77,23 @@ variable "image_digests" {
   }
 }
 
+variable "demo_image_digests" {
+  description = <<-EOT
+    Image digests for the two demo apps (map: "saml-sp" and "oidc-rp" ->
+    "sha256:..."), written by `make push-demo-images`. The demo repos are
+    IMMUTABLE and no :latest tag is pushed, so the demo stack deploys each app
+    by digest, like the gateway. Empty by default so `terraform validate` stays
+    clean; a real demo apply fails closed when a key is missing.
+  EOT
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition     = alltrue([for d in values(var.demo_image_digests) : can(regex("^sha256:[0-9a-f]{64}$", d))])
+    error_message = "Each demo_image_digests value must be a full image digest of the form sha256:<64 hex chars>."
+  }
+}
+
 variable "state_bucket" {
   description = <<-EOT
     Name of the versioned, SSE-KMS-encrypted, public-access-blocked S3 bucket

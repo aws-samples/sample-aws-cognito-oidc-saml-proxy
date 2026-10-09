@@ -36,7 +36,9 @@ module "lambda_demo_saml" {
   description    = "Demo SAML Service Provider"
   package_type   = "Image"
   architectures  = ["arm64"]
-  image_uri      = "${data.terraform_remote_state.registry.outputs.ecr_demo_saml_url}:latest"
+  # By digest, written by `make push-demo-images`. The repo is IMMUTABLE and no
+  # :latest tag is pushed, so a tag reference would not resolve.
+  image_uri      = "${data.terraform_remote_state.registry.outputs.ecr_demo_saml_url}@${var.demo_image_digests["saml-sp"]}"
   create_package = false
   memory_size    = 256
   timeout        = 15
@@ -78,7 +80,7 @@ module "lambda_demo_oidc" {
   description    = "Demo OIDC Relying Party"
   package_type   = "Image"
   architectures  = ["arm64"]
-  image_uri      = "${data.terraform_remote_state.registry.outputs.ecr_demo_oidc_url}:latest"
+  image_uri      = "${data.terraform_remote_state.registry.outputs.ecr_demo_oidc_url}@${var.demo_image_digests["oidc-rp"]}"
   create_package = false
   memory_size    = 256
   timeout        = 15
