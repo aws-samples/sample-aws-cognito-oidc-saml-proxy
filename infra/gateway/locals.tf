@@ -6,8 +6,11 @@ locals {
   tags             = module.common.tags
   lambda_functions = module.common.lambda_functions
 
-  # Audit trail log group. The suffix keeps instances that share an account and
-  # region (name_suffix) apart; with no suffix it is the historical name.
+  # Names outside name_prefix that must still be unique per account and region
+  # (or, for the Cognito domain prefix, globally). Each carries name_suffix when
+  # one is set so two instances can share an account and region; with no suffix
+  # every name is the historical one, so existing deployments are unchanged.
+  instance_name        = var.name_suffix != "" ? "${var.environment}-${var.name_suffix}" : var.environment
   audit_log_group_name = var.name_suffix != "" ? "/identity-gateway/${var.name_suffix}/audit" : "/identity-gateway/audit"
 
   # Map key for the scheduled health check. The EventBridge module derives the

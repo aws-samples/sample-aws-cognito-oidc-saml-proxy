@@ -46,6 +46,12 @@ module "eventbridge" {
   # the account. Disabling it removes both the needless role and the collision.
   create_role = false
 
+  # Do not create a log delivery source for the default bus. With no
+  # log_delivery destinations it delivers nothing, and the module names it after
+  # the bus ("default"), a name that is unique per account and region, so any
+  # second instance (or other user of this module on the default bus) collides.
+  create_log_delivery = false
+
   # The module names the rule after this key ("<key>-rule", "_" -> "-"), and
   # rule names on the default bus are unique per account and region, so the key
   # carries name_suffix. See local.health_check_rule_key.

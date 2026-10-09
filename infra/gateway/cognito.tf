@@ -132,7 +132,7 @@ resource "aws_cognito_user_pool" "main" {
 ################################################################################
 
 resource "aws_cognito_user_pool_domain" "main" {
-  domain                = "fed-gw-${var.environment}-${data.aws_caller_identity.current.account_id}"
+  domain                = "fed-gw-${local.instance_name}-${data.aws_caller_identity.current.account_id}"
   user_pool_id          = aws_cognito_user_pool.main.id
   managed_login_version = 2
 }

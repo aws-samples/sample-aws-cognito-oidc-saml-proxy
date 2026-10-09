@@ -430,6 +430,10 @@ run "shared_names_without_suffix" {
     error_message = "With no name_suffix the health check rule must keep its historical key."
   }
   assert {
+    condition     = local.instance_name == "dev" && startswith(aws_cognito_user_pool_domain.main.domain, "fed-gw-dev-")
+    error_message = "With no name_suffix the KMS aliases and Cognito domain must keep their historical names."
+  }
+  assert {
     condition     = local.fn_common_env["PROXY_AUDIT_LOG_GROUP"] == aws_cloudwatch_log_group.audit.name
     error_message = "Every Lambda must receive the audit log group name in PROXY_AUDIT_LOG_GROUP."
   }
@@ -449,6 +453,14 @@ run "shared_names_with_suffix" {
   assert {
     condition     = contains(keys(module.eventbridge.eventbridge_rule_arns), "lambda_health_check_v2")
     error_message = "The health check rule key (and so the rule name) must carry name_suffix."
+  }
+  assert {
+    condition     = local.instance_name == "dev-v2"
+    error_message = "The KMS alias path segment must carry name_suffix (saml-proxy/dev-v2/...)."
+  }
+  assert {
+    condition     = startswith(aws_cognito_user_pool_domain.main.domain, "fed-gw-dev-v2-")
+    error_message = "The Cognito domain prefix is globally unique, so it must carry name_suffix."
   }
   assert {
     condition     = local.fn_common_env["PROXY_AUDIT_LOG_GROUP"] == "/identity-gateway/v2/audit"

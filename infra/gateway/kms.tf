@@ -27,7 +27,7 @@ module "kms_saml_signing" {
   key_usage                = "SIGN_VERIFY"
   enable_key_rotation      = false # Not supported for asymmetric keys
 
-  aliases = ["saml-proxy/${var.environment}/signing"]
+  aliases = ["saml-proxy/${local.instance_name}/signing"]
 
   # Lambda access granted via IAM policies in lambda_functions.tf (per-capability
   # least-privilege). The default key policy grants the account root full access,
@@ -59,7 +59,7 @@ module "kms_saml_signing_backup" {
   key_usage                = "SIGN_VERIFY"
   enable_key_rotation      = false # Not supported for asymmetric keys
 
-  aliases = ["saml-proxy/${var.environment}/signing-backup"]
+  aliases = ["saml-proxy/${local.instance_name}/signing-backup"]
 
   tags = {
     Component = "saml-signing-backup"
@@ -78,7 +78,7 @@ module "kms_encryption" {
   key_usage           = "ENCRYPT_DECRYPT"
   enable_key_rotation = true
 
-  aliases = ["saml-proxy/${var.environment}/encryption"]
+  aliases = ["saml-proxy/${local.instance_name}/encryption"]
 
   # Lambda access granted via IAM policies in lambda_functions.tf (per-capability
   # least-privilege). The default key policy grants the account root full access,
