@@ -167,10 +167,26 @@ resource "aws_cognito_user_pool_client" "spa" {
 
   generate_secret = false
 
+  # The admin console authenticates exclusively through the Amplify hosted-UI
+  # redirect (authorization-code + PKCE, see frontend/src/auth.ts
+  # signInWithRedirect), so only the refresh-token flow is needed. SRP is
+  # deliberately omitted: ALLOW_USER_SRP_AUTH lets a signed-in user run
+  # InitiateAuth directly and obtain an access token carrying the
+  # aws.cognito.signin.user.admin scope, which is what makes UpdateUserAttributes
+  # reachable for a self-service tenant_id rewrite (finding S-1 / H1).
   explicit_auth_flows = [
     "ALLOW_REFRESH_TOKEN_AUTH",
-    "ALLOW_USER_SRP_AUTH",
   ]
+
+  # Attribute permissions. write_attributes is an explicit minimal standard set
+  # that EXCLUDES custom:tenant_id — Cognito's default write set would otherwise
+  # let a user call UpdateUserAttributes on their own custom:tenant_id and
+  # escalate into another tenant, because the management API trusts that claim
+  # (internal/middleware/auth.go) and Cognito groups are pool-wide.
+  # read_attributes includes custom:tenant_id so the app can still read it from
+  # ID tokens for tenant resolution.
+  write_attributes = ["email", "name", "given_name", "family_name"]
+  read_attributes  = ["email", "email_verified", "name", "given_name", "family_name", "custom:tenant_id"]
 
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_flows                  = ["code"]
@@ -224,6 +240,13 @@ resource "aws_cognito_user_pool_client" "backend" {
     # tenants and apps via the management API). No client secret is involved.
     "ALLOW_ADMIN_USER_PASSWORD_AUTH",
   ]
+
+  # Same tenant-isolation hardening as the SPA client: an explicit write set
+  # excluding custom:tenant_id prevents a self-service rewrite of the tenant
+  # claim via UpdateUserAttributes, while read_attributes keeps custom:tenant_id
+  # readable from ID tokens for tenant resolution (finding S-1 / H1).
+  write_attributes = ["email", "name", "given_name", "family_name"]
+  read_attributes  = ["email", "email_verified", "name", "given_name", "family_name", "custom:tenant_id"]
 
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_flows                  = ["code"]
