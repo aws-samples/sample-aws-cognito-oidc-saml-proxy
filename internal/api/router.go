@@ -82,7 +82,11 @@ func NewRouter(deps Dependencies) (chi.Router, error) {
 
 	r := chi.NewRouter()
 	r.Use(chimiddleware.RequestID)
-	r.Use(chimiddleware.RealIP)
+	// RealIP is deprecated as of chi v5.3.0 (bumped here for GO-2026-5774/5775/5777).
+	// Behind CloudFront+API Gateway only the appended XFF hop is trustworthy, so replacing
+	// RealIP with a CloudFront-aware client-IP source is tracked separately and is OUT of
+	// scope for this security bump; the rewritten RemoteAddr only feeds logs/audit here.
+	r.Use(chimiddleware.RealIP) //nolint:staticcheck // SA1019: deprecation acknowledged; replacement out of scope (see note above)
 	r.Use(chimiddleware.Recoverer)
 	r.Use(middleware.Logging)
 	r.Use(middleware.Metrics)

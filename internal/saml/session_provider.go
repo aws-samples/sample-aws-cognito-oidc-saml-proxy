@@ -61,6 +61,71 @@ type sessionEnvelope struct {
 	SPEntityID string            `json:"sp,omitempty"`
 }
 
+// mintedSessionCtxKey is the context key under which an internal hand-off
+// (HandleIdPInitiate, HandleLoginComplete, the OAuth2 HandleCallback) passes the
+// freshly minted, already-verified session to the resumed ServeSSO/
+// ServeIDPInitiated call. GetSession consults this value FIRST, before the HTTP
+// request's Cookie header.
+//
+// This replaces the previous r.AddCookie hand-off, which was unsafe: AddCookie
+// APPENDS the fresh cookie after any pre-existing saml_session cookie in the
+// browser's Cookie header, and r.Cookie() returns the FIRST match. So a stale,
+// foreign or different-user cookie already in the browser shadowed the freshly
+// minted one, and the assertion was issued for the wrong identity (findings H-2
+// / M-1). A request-context value cannot be shadowed by the browser.
+type mintedSessionCtxKey struct{}
+
+// mintedSession is the trusted, server-minted session carried in the request
+// context for an internal hand-off, together with the binding it was minted for.
+// GetSession enforces this binding against the current request before trusting
+// the session, so even the trusted hand-off cannot cross the tenant/SP boundary.
+type mintedSession struct {
+	session    *crewsaml.Session
+	tenantSlug string
+	sourceID   string
+	spEntityID string
+}
+
+// withMintedSession returns a copy of ctx carrying a trusted, server-minted
+// session for the resumed IdP call to consume via GetSession.
+func withMintedSession(ctx context.Context, m *mintedSession) context.Context {
+	return context.WithValue(ctx, mintedSessionCtxKey{}, m)
+}
+
+// mintedSessionFromContext returns the trusted minted session, if the current
+// request is an internal hand-off.
+func mintedSessionFromContext(ctx context.Context) (*mintedSession, bool) {
+	m, ok := ctx.Value(mintedSessionCtxKey{}).(*mintedSession)
+	return m, ok && m != nil && m.session != nil
+}
+
+// requestWithMintedSession decodes the just-minted, signed session cookie back
+// into its session + binding and returns a request whose context carries it as a
+// trusted hand-off for the resumed ServeSSO/ServeIDPInitiated call. This is the
+// replacement for the old r.AddCookie hand-off: GetSession reads the context
+// value before the browser's Cookie header, so a pre-existing saml_session
+// cookie can no longer shadow the freshly minted one (findings H-2 / M-1).
+//
+// The sessCookie bytes are the authoritative, HMAC-signed envelope this handler
+// just produced, so decoding them recovers the exact session and its
+// tenant/source/SP binding without trusting any request-supplied value. On a
+// decode error we return the request unchanged; GetSession then falls through to
+// its normal (cookie / re-auth) handling rather than silently trusting nothing.
+func (sp *SessionProvider) requestWithMintedSession(r *http.Request, sessCookie string) *http.Request {
+	session, env, err := sp.decodeSessionEnvelope(sessCookie)
+	if err != nil {
+		slog.Error("internal hand-off: failed to decode freshly minted session cookie", "error", err)
+		return r
+	}
+	m := &mintedSession{
+		session:    session,
+		tenantSlug: env.TenantSlug,
+		sourceID:   env.SourceID,
+		spEntityID: env.SPEntityID,
+	}
+	return r.WithContext(withMintedSession(r.Context(), m))
+}
+
 // SessionProvider implements crewsaml.SessionProvider. It bridges the Cognito
 // OAuth2+PKCE flow with the crewjam/saml IdP library.
 //
@@ -282,6 +347,28 @@ func (sp *SessionProvider) resolveAuthClient(ctx context.Context, tenantSlug, en
 // initiates a Cognito OAuth2+PKCE redirect and returns nil (meaning the HTTP
 // response has already been written).
 func (sp *SessionProvider) GetSession(w http.ResponseWriter, r *http.Request, req *crewsaml.IdpAuthnRequest) *crewsaml.Session {
+	// Trusted internal hand-off FIRST. HandleIdPInitiate / HandleLoginComplete /
+	// HandleCallback mint and verify a session, then resume ServeSSO/
+	// ServeIDPInitiated carrying that session in the request context. We trust it
+	// before any browser cookie so a stale/foreign/different-user saml_session
+	// cookie already in the browser cannot shadow the freshly minted one
+	// (findings H-2 / M-1). The binding is still enforced: the minted session's
+	// tenant must match the request path, and its SP must match the target SP —
+	// resolved from req.ServiceProviderMetadata when crewjam has populated it,
+	// otherwise from the entityID the hand-off recorded on the minted session.
+	if m, ok := mintedSessionFromContext(r.Context()); ok {
+		if sp.mintedSessionBindingMatches(r, req, m) {
+			return m.session
+		}
+		slog.Warn("rejected internal hand-off session with mismatched binding",
+			"mintedTenant", m.tenantSlug, "mintedSP", m.spEntityID,
+			"pathTenant", chi.URLParam(r, "tenant"))
+		// A hand-off that fails its own binding is a programming/attack error, not
+		// a reason to fall back to a browser cookie; deny.
+		http.Error(w, "session binding mismatch", http.StatusForbidden)
+		return nil
+	}
+
 	// Check for existing session cookie. A cookie is only reused if its signed
 	// binding matches the tenant and target SP of THIS request; a session minted
 	// for another tenant or another SP is ignored (treated as no session) so it
@@ -356,6 +443,18 @@ func (sp *SessionProvider) GetSession(w http.ResponseWriter, r *http.Request, re
 		}
 	}
 
+	// Nil-guard the SP metadata. In the SP-initiated flow crewjam populates it
+	// before calling GetSession, but an IdP-initiated request that reaches this
+	// fall-through (no trusted hand-off, no reusable cookie, no bearer token)
+	// would otherwise nil-deref here and 500 (finding M-1). Without a target SP
+	// we cannot resolve the identity source or start a Cognito redirect, so fail
+	// closed rather than panic.
+	if req == nil || req.ServiceProviderMetadata == nil {
+		slog.Warn("GetSession reached redirect fall-through without SP metadata; denying",
+			"tenant", chi.URLParam(r, "tenant"))
+		http.Error(w, "no authenticated session", http.StatusUnauthorized)
+		return nil
+	}
 	entityID := req.ServiceProviderMetadata.EntityID
 	tenantSlug := chi.URLParam(r, "tenant")
 
@@ -574,16 +673,12 @@ func (sp *SessionProvider) HandleCallback(w http.ResponseWriter, r *http.Request
 			if state.RelayState != "" {
 				r.PostForm.Set("RelayState", state.RelayState)
 			}
-			// Inject the session cookie into the request so the IdP's
-			// GetSession call finds the session we just created, avoiding a
-			// second redirect to Cognito.
-			// Inbound request cookie (r.AddCookie), never written to the
-			// client, so Secure/HttpOnly do not apply.
-			// nosemgrep: cookie-missing-secure, cookie-missing-httponly
-			r.AddCookie(&http.Cookie{ //nolint:gosec // internal request cookie, never sent to client
-				Name:  sessionCookieName,
-				Value: sessCookie,
-			})
+			// Hand the freshly minted, verified session to the resumed
+			// ServeSSO via the request context (NOT r.AddCookie), so the
+			// session we just created wins over any pre-existing browser
+			// saml_session cookie (findings H-2 / M-1). GetSession re-checks the
+			// cookie's tenant/SP binding against this request before trusting it.
+			r = sp.requestWithMintedSession(r, sessCookie)
 			idp.ServeSSO(w, r)
 			return
 		}
@@ -685,6 +780,14 @@ func (sp *SessionProvider) trySessionFromIDToken(w http.ResponseWriter, r *http.
 		return nil, false
 	}
 
+	// Nil-guard SP metadata before dereferencing EntityID: an IdP-initiated
+	// request carrying a bearer token can reach here with metadata still nil
+	// (crewjam resolves the SP after GetSession in that flow), which would
+	// otherwise panic (finding M-1). Without a target SP we cannot resolve the
+	// bound source, so treat it as "no bearer path" and fall through.
+	if req == nil || req.ServiceProviderMetadata == nil {
+		return nil, false
+	}
 	entityID := req.ServiceProviderMetadata.EntityID
 	tenantSlug := chi.URLParam(r, "tenant")
 	source, err := sp.resolveSource(r.Context(), tenantSlug, entityID)
@@ -778,6 +881,13 @@ func (sp *SessionProvider) tryCustomLoginRedirect(w http.ResponseWriter, r *http
 		return false
 	}
 
+	// Nil-guard SP metadata before dereferencing EntityID (finding M-1): an
+	// IdP-initiated request can reach here with metadata nil. Custom-login
+	// redirect only applies to the interactive SP-initiated flow, so fall
+	// through rather than panic.
+	if req == nil || req.ServiceProviderMetadata == nil {
+		return false
+	}
 	entityID := req.ServiceProviderMetadata.EntityID
 	tenantSlug := chi.URLParam(r, "tenant")
 	if tenantSlug == "" {
@@ -966,9 +1076,15 @@ func buildSessionFromClaims(claims *cognito.UserClaims) *crewsaml.Session {
 //     populates req.ServiceProviderMetadata before calling GetSession, so the SP
 //     is compared and a session minted for another SP in the same tenant is
 //     rejected. In the IdP-initiated flow crewjam calls GetSession *before*
-//     resolving the SP (metadata is nil), and the cookie was just minted and
-//     injected for this exact request by HandleIdPInitiate, so skipping the SP
-//     comparison there is safe and avoids breaking that flow.
+//     resolving the SP (req.ServiceProviderMetadata is nil), so targetSP is
+//     unknown and the SP comparison here cannot run. This function is therefore
+//     NOT the IdP-initiated defense: that path no longer relies on an injected
+//     cookie reaching GetSession (it uses the trusted request-context hand-off,
+//     whose SP binding is checked against the target entityID in
+//     mintedSessionBindingMatches). For a plain browser cookie reaching an
+//     IdP-initiated GetSession, the SP cannot be checked here, so such a cookie
+//     is only tenant-matched; the IdP-initiated flow does not reuse it to decide
+//     identity because the trusted hand-off takes precedence.
 func (sp *SessionProvider) sessionBindingMatches(r *http.Request, req *crewsaml.IdpAuthnRequest, env sessionEnvelope) bool {
 	if env.TenantSlug != chi.URLParam(r, "tenant") {
 		return false
@@ -978,6 +1094,28 @@ func (sp *SessionProvider) sessionBindingMatches(r *http.Request, req *crewsaml.
 		targetSP = req.ServiceProviderMetadata.EntityID
 	}
 	if env.SPEntityID != "" && targetSP != "" && env.SPEntityID != targetSP {
+		return false
+	}
+	return true
+}
+
+// mintedSessionBindingMatches enforces the binding of a trusted internal
+// hand-off session (GetSession's context fast-path) against the current request.
+// Unlike a browser cookie, the minted session carries the exact tenant/SP it was
+// minted for, so the SP binding can be enforced even in the IdP-initiated flow
+// where req.ServiceProviderMetadata is nil at GetSession time: we fall back to
+// the entityID the hand-off recorded. Tenant is always enforced.
+func (sp *SessionProvider) mintedSessionBindingMatches(r *http.Request, req *crewsaml.IdpAuthnRequest, m *mintedSession) bool {
+	if m.tenantSlug != chi.URLParam(r, "tenant") {
+		return false
+	}
+	// Prefer the SP crewjam resolved for this request; otherwise (IdP-initiated,
+	// metadata not yet populated) use the SP entityID the hand-off minted for.
+	targetSP := m.spEntityID
+	if req != nil && req.ServiceProviderMetadata != nil && req.ServiceProviderMetadata.EntityID != "" {
+		targetSP = req.ServiceProviderMetadata.EntityID
+	}
+	if m.spEntityID != "" && targetSP != "" && m.spEntityID != targetSP {
 		return false
 	}
 	return true

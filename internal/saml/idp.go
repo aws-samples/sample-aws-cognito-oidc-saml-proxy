@@ -478,13 +478,11 @@ func (h *TenantIdPHandler) HandleLoginComplete(w http.ResponseWriter, r *http.Re
 	}
 	r.PostForm = form
 	r.Form = nil
-	// Inbound request cookie (r.AddCookie), never written to the client, so
-	// Secure/HttpOnly do not apply. The response cookie above sets both.
-	// nosemgrep: cookie-missing-secure, cookie-missing-httponly
-	r.AddCookie(&http.Cookie{ //nolint:gosec // internal request cookie, never sent to client
-		Name:  sessionCookieName,
-		Value: sessCookie,
-	})
+	// Hand the freshly minted, verified session to the resumed ServeSSO via the
+	// request context (NOT r.AddCookie), so a pre-existing browser saml_session
+	// cookie cannot shadow it (findings H-2 / M-1). GetSession re-checks the
+	// cookie's tenant/SP binding against this request before trusting it.
+	r = h.sessionProv.requestWithMintedSession(r, sessCookie)
 
 	h.ServeSSO(w, r)
 }
@@ -572,13 +570,14 @@ func (h *TenantIdPHandler) HandleIdPInitiate(w http.ResponseWriter, r *http.Requ
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
-	// Inbound request cookie (r.AddCookie), never written to the client, so
-	// Secure/HttpOnly do not apply. The response cookie above sets both.
-	// nosemgrep: cookie-missing-secure, cookie-missing-httponly
-	r.AddCookie(&http.Cookie{ //nolint:gosec // internal request cookie, never sent to client
-		Name:  sessionCookieName,
-		Value: sessCookie,
-	})
+	// Hand the freshly minted, verified session to the resumed ServeIDPInitiated
+	// via the request context (NOT r.AddCookie). GetSession consults the context
+	// before the browser's Cookie header, so a stale/foreign/different-user
+	// saml_session cookie already in the browser cannot shadow this one and make
+	// the IdP assert the wrong identity (findings H-2 / M-1). The binding carried
+	// in the cookie (tenant/source/SP) is re-checked against this request before
+	// the session is trusted.
+	r = h.sessionProv.requestWithMintedSession(r, sessCookie)
 
 	// IdP-initiated SSO completes synchronously here (ServeIDPInitiated builds
 	// and auto-posts the assertion), so the IdP is local to this request and no

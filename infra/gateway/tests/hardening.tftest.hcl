@@ -188,6 +188,50 @@ run "cognito_mfa_and_threat_protection" {
   }
 }
 
+# Tenant isolation: neither app client may let a user write custom:tenant_id,
+# and the SPA client must not expose the SRP flow that makes UpdateUserAttributes
+# reachable. The management API trusts the custom:tenant_id claim and Cognito
+# groups are pool-wide, so a self-writable tenant_id is cross-tenant escalation
+# (findings S-1 / H1).
+run "cognito_clients_cannot_write_tenant_id" {
+  command = plan
+
+  assert {
+    condition     = !contains(aws_cognito_user_pool_client.spa.write_attributes, "custom:tenant_id")
+    error_message = "SPA client write_attributes must not include custom:tenant_id (cross-tenant escalation)."
+  }
+
+  assert {
+    condition     = !contains(aws_cognito_user_pool_client.backend.write_attributes, "custom:tenant_id")
+    error_message = "Backend client write_attributes must not include custom:tenant_id (cross-tenant escalation)."
+  }
+
+  # write_attributes must be set explicitly (non-empty); an empty/unset set means
+  # Cognito applies its permissive default write set, which includes the custom attr.
+  assert {
+    condition     = length(aws_cognito_user_pool_client.spa.write_attributes) > 0
+    error_message = "SPA client must set explicit write_attributes so Cognito's default write set does not apply."
+  }
+
+  assert {
+    condition     = length(aws_cognito_user_pool_client.backend.write_attributes) > 0
+    error_message = "Backend client must set explicit write_attributes so Cognito's default write set does not apply."
+  }
+
+  # The app still needs to read custom:tenant_id from ID tokens for tenant resolution.
+  assert {
+    condition     = contains(aws_cognito_user_pool_client.spa.read_attributes, "custom:tenant_id")
+    error_message = "SPA client read_attributes must include custom:tenant_id so the app can resolve the tenant."
+  }
+
+  # SRP is removed from the SPA client: it would let a signed-in user call
+  # InitiateAuth directly and obtain the aws.cognito.signin.user.admin scope.
+  assert {
+    condition     = !contains(aws_cognito_user_pool_client.spa.explicit_auth_flows, "ALLOW_USER_SRP_AUTH")
+    error_message = "SPA client must not allow ALLOW_USER_SRP_AUTH (enables self-service UpdateUserAttributes)."
+  }
+}
+
 # A REGIONAL WAF ACL carrying the full rule set exists, ready to bind to a
 # WAF-associable regional resource. It is deliberately NOT associated with the
 # HTTP API: WAFv2 AssociateWebACL does not support API Gateway HTTP (v2) stages,
