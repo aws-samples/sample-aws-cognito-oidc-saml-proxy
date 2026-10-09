@@ -23,6 +23,10 @@ const (
 	EnvProd    Environment = "prod"
 )
 
+// DefaultAuditLogGroup is the audit log group when PROXY_AUDIT_LOG_GROUP is
+// unset. It matches the name Terraform uses when name_suffix is empty.
+const DefaultAuditLogGroup = "/identity-gateway/audit"
+
 // IsLocal reports whether the gateway is running in the local developer
 // environment — the ONLY environment in which JWT auth may be bypassed, the OIDC
 // issuer may be served over plain HTTP, and in-memory stores may back the API.
@@ -96,6 +100,11 @@ type Config struct {
 	// dev only (cmd/proxy falls back to a per-process random key there).
 	CookieKeySecretARN string // PROXY_COOKIE_KEY_SECRET_ARN
 
+	// AuditLogGroup is the CloudWatch Logs group that holds the permanent audit
+	// trail. Terraform sets it per deployment, so instances that share an
+	// account and region (name_suffix) write to separate groups.
+	AuditLogGroup string // PROXY_AUDIT_LOG_GROUP
+
 	// EdgeAuthSecretARN is the Secrets Manager ARN of the CloudFront
 	// origin-verify shared secret. Each request-handling Lambda fetches the raw
 	// 48-character token from SM once at cold-start and passes it to
@@ -136,6 +145,7 @@ func Load() (*Config, error) {
 		OIDCCryptoKeySecretARN: env("PROXY_OIDC_CRYPTO_KEY_SECRET_ARN"),
 		CookieKeySecretARN:     env("PROXY_COOKIE_KEY_SECRET_ARN"),
 		EdgeAuthSecretARN:      env("PROXY_EDGE_AUTH_SECRET_ARN"),
+		AuditLogGroup:          envOr("PROXY_AUDIT_LOG_GROUP", DefaultAuditLogGroup),
 	}
 
 	// Apply local development defaults BEFORE validation

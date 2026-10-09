@@ -14,6 +14,16 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "8080", cfg.Port)
 	assert.Equal(t, "info", cfg.LogLevel)
+	assert.Equal(t, config.DefaultAuditLogGroup, cfg.AuditLogGroup)
+}
+
+func TestLoadConfig_AuditLogGroupOverride(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv("PROXY_AUDIT_LOG_GROUP", "/identity-gateway/v2/audit")
+
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, "/identity-gateway/v2/audit", cfg.AuditLogGroup)
 }
 
 func TestLoadConfig_MissingEnvironment(t *testing.T) {

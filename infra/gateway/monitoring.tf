@@ -46,8 +46,11 @@ module "eventbridge" {
   # the account. Disabling it removes both the needless role and the collision.
   create_role = false
 
+  # The module names the rule after this key ("<key>-rule", "_" -> "-"), and
+  # rule names on the default bus are unique per account and region, so the key
+  # carries name_suffix. See local.health_check_rule_key.
   rules = {
-    lambda_health_check = {
+    (local.health_check_rule_key) = {
       description         = "Periodic health check for the SAML proxy"
       schedule_expression = "rate(5 minutes)"
       state               = "ENABLED"
@@ -55,7 +58,7 @@ module "eventbridge" {
   }
 
   targets = {
-    lambda_health_check = [
+    (local.health_check_rule_key) = [
       {
         name = "saml-proxy-health-check"
         arn  = module.lambda_fn["health"].lambda_function_arn
@@ -77,7 +80,7 @@ resource "aws_lambda_permission" "eventbridge_health" {
   action        = "lambda:InvokeFunction"
   function_name = module.lambda_fn["health"].lambda_function_name
   principal     = "events.amazonaws.com"
-  source_arn    = module.eventbridge.eventbridge_rule_arns["lambda_health_check"]
+  source_arn    = module.eventbridge.eventbridge_rule_arns[local.health_check_rule_key]
 }
 
 ################################################################################

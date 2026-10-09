@@ -6,6 +6,15 @@ locals {
   tags             = module.common.tags
   lambda_functions = module.common.lambda_functions
 
+  # Audit trail log group. The suffix keeps instances that share an account and
+  # region (name_suffix) apart; with no suffix it is the historical name.
+  audit_log_group_name = var.name_suffix != "" ? "/identity-gateway/${var.name_suffix}/audit" : "/identity-gateway/audit"
+
+  # Map key for the scheduled health check. The EventBridge module derives the
+  # rule name from it (lambda-health-check[-<suffix>]-rule), so instances in one
+  # account and region get distinct rules. No suffix keeps the historical name.
+  health_check_rule_key = var.name_suffix != "" ? "lambda_health_check_${replace(var.name_suffix, "-", "_")}" : "lambda_health_check"
+
   # Resolve the base URL: custom domain if set, otherwise the CloudFront distribution URL.
   # All protocol flows (SAML, OIDC) must route through CloudFront for WAF protection.
   base_url = var.custom_domain != "" ? "https://${var.custom_domain}" : "https://${aws_cloudfront_distribution.main.domain_name}"
