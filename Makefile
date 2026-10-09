@@ -1,4 +1,4 @@
-.PHONY: build test test-integration test-e2e lint clean docker-build fmt vet frontend-install frontend-build frontend-deploy frontend-dev frontend-lint generate-types build-all lint-all build-all-lambdas docker-build-all security-scan security-scan-strict registry-init registry-apply push-function-images push-demo-images gateway-init gateway-apply demo-init demo-apply deploy-dev registry-destroy gateway-destroy demo-destroy destroy-dev post-install tf-init tf-plan tf-validate render-diagrams
+.PHONY: build test test-integration test-e2e lint clean docker-build fmt vet frontend-install frontend-build frontend-deploy frontend-dev frontend-lint generate-types build-all lint-all build-all-lambdas docker-build-all security-scan security-scan-strict check-public registry-init registry-apply push-function-images push-demo-images gateway-init gateway-apply demo-init demo-apply deploy-dev registry-destroy gateway-destroy demo-destroy destroy-dev post-install tf-init tf-plan tf-validate render-diagrams
 
 BINARY_NAME := proxy
 BUILD_DIR := bin
@@ -138,6 +138,13 @@ security-scan:
 # Stricter gate: also fail on WARNING/MEDIUM findings.
 security-scan-strict:
 	SEVERITY_GATE=warning ./scripts/security-scan.sh
+
+# Fail if tracked files contain content that must not be published (internal
+# hostnames, real account IDs, local state). Add private patterns, one regex per
+# line, to the gitignored .public-check-patterns file.
+# Pass RANGE=origin/main..HEAD to also scan commit messages.
+check-public:
+	./scripts/check-public.sh $(if $(RANGE),--range $(RANGE))
 
 docker-build:
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(GO_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/proxy/

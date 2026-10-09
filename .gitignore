@@ -91,6 +91,9 @@ frontend/.env.*.local
 
 # Local security-scan outputs (do not commit)
 scan-results/
+# Private patterns for scripts/check-public.sh. The patterns are themselves
+# identifiers that must not be published.
+.public-check-patterns
 # ASH (Automated Security Helper) output — CI regenerates this as a job
 # artifact; never commit the local scan tree.
 .ash/
