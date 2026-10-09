@@ -265,7 +265,7 @@ Then run an end-to-end SSO from your application (or the optional demo apps belo
 ### Optional: the Custom UI demo
 
 A standalone React demo that shows building your own login UI against the gateway lives in
-[`examples/custom-ui`](../examples/custom-ui/README.md) — deploy it separately (S3 +
+[`examples/custom-ui`](https://github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/tree/main/examples/custom-ui) — deploy it separately (S3 +
 CloudFront) to exercise login, registration, password reset, token refresh, and the
 IdP-initiated app launcher.
 

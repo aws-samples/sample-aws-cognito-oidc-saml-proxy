@@ -1,0 +1,84 @@
+site_name: Identity Federation Gateway
+site_description: >-
+  Multi-tenant, serverless SAML 2.0 IdP and OpenID Connect Provider that extends
+  Amazon Cognito user pools.
+repo_url: https://github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy
+repo_name: sample-aws-cognito-oidc-saml-proxy
+edit_uri: edit/main/docs/
+docs_dir: docs
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.tracking
+    - content.code.copy
+    - toc.follow
+    - search.suggest
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Overview:
+      - Introduction: overview/introduction.md
+      - Architecture: overview/architecture.md
+      - Data model: overview/data-model.md
+      - Cost estimate: overview/cost.md
+      - Security: overview/security.md
+  - Protocols:
+      - SAML 2.0 IdP: protocols/saml.md
+      - OpenID Connect: protocols/oidc.md
+  - Deployment:
+      - Prerequisites: deployment/prerequisites.md
+      - Quickstart: deployment/quickstart.md
+      - Post-install: deployment/post-install.md
+      - Teardown: deployment/teardown.md
+  - Guides:
+      - Local development: guides/local-development.md
+      - Administration console: guides/admin-console.md
+  - Reference:
+      - Make commands: reference/make-commands.md
