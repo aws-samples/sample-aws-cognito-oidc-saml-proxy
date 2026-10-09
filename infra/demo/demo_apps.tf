@@ -32,12 +32,12 @@ module "lambda_demo_saml" {
   source  = "terraform-aws-modules/lambda/aws"
   version = "~> 8.7"
 
+  # image_uri is by digest, written by `make push-demo-images`. The repo is
+  # IMMUTABLE and no :latest tag is pushed, so a tag would not resolve.
   function_name  = "${local.name_prefix}-demo-saml-sp"
   description    = "Demo SAML Service Provider"
   package_type   = "Image"
   architectures  = ["arm64"]
-  # By digest, written by `make push-demo-images`. The repo is IMMUTABLE and no
-  # :latest tag is pushed, so a tag reference would not resolve.
   image_uri      = "${data.terraform_remote_state.registry.outputs.ecr_demo_saml_url}@${var.demo_image_digests["saml-sp"]}"
   create_package = false
   memory_size    = 256
