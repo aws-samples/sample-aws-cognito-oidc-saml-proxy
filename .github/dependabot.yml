@@ -7,6 +7,13 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    groups:
+      # Collapse all minor/patch action bumps into a single weekly PR.
+      actions:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
 
   # Root Go module (the proxy service).
   - package-ecosystem: gomod
@@ -15,6 +22,18 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    groups:
+      # The aws-sdk-go-v2 modules release together and must stay in lockstep,
+      # so group every bump (including majors) into one PR.
+      aws-sdk-go-v2:
+        patterns:
+          - "github.com/aws/aws-sdk-go-v2*"
+          - "github.com/aws/smithy-go"
+      # Everything else: one PR per week for minor/patch updates.
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
 
   # Demo relying-party app module.
   - package-ecosystem: gomod
@@ -23,6 +42,11 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    groups:
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
 
   # Demo service-provider app module.
   - package-ecosystem: gomod
@@ -31,3 +55,47 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    groups:
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Gateway admin frontend (React + Vite).
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Custom-UI example frontend (React + Vite).
+  - package-ecosystem: npm
+    directory: /examples/custom-ui/frontend
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Browser-based end-to-end test harness.
+  - package-ecosystem: npm
+    directory: /scripts/browser-e2e
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      npm-minor-patch:
+        update-types:
+          - minor
+          - patch
