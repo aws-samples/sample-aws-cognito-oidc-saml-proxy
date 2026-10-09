@@ -11,32 +11,33 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@cloudscape-design/collection-hooks": "^1.0.87",
-    "@cloudscape-design/components": "^3.0.1255",
-    "@cloudscape-design/global-styles": "^1.0.54",
-    "@tanstack/react-query": "^5.95.2",
-    "aws-amplify": "^6.16.3",
+    "@cloudscape-design/collection-hooks": "^1.0.110",
+    "@cloudscape-design/components": "^3.0.1396",
+    "@cloudscape-design/global-styles": "^1.0.71",
+    "@tanstack/react-query": "^5.104.1",
+    "aws-amplify": "^6.22.1",
     "openapi-fetch": "^0.17.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^7.18.1"
+    "react-router-dom": "^7.18.4"
   },
   "devDependencies": {
-    "@testing-library/react": "^16.3.2",
+    "@testing-library/react": "^16.3.3",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.1",
-    "jsdom": "^29.0.1",
-    "typescript": "^6.0.2",
-    "vite": "^8.1.4",
-    "vitest": "^4.1.2"
+    "@vitejs/plugin-react": "^6.1.2",
+    "jsdom": "^29.1.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.4",
+    "vitest": "^4.1.11"
   },
   "overrides": {
     "js-cookie": "3.0.7",
     "fast-xml-builder": "1.1.7",
-    "undici": "^7.28.0",
-    "uuid": ">=11.1.1",
-    "postcss": ">=8.5.16",
-    "fast-xml-parser": ">=5.9.3"
+    "undici": "^7.30.0",
+    "uuid": "^11.1.1",
+    "postcss": "^8.5.25",
+    "fast-xml-parser": "^5.10.1",
+    "source-map-js": "^1.2.2"
   }
 }
