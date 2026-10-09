@@ -106,7 +106,27 @@ func HandleSLO(baseURL string, sessions domain.SessionRepository, apps domain.Ap
 			return
 		}
 
-		encoded := r.URL.Query().Get("SAMLRequest")
+		// Extract the redirect-binding parameters from the SAME raw bytes the
+		// signature is verified over, instead of r.URL.Query(). url.ParseQuery
+		// URL-decodes parameter NAMES, so "SAML%52equest" would parse as
+		// "SAMLRequest" and Get() would return a forged value, while the detached
+		// signature is verified over the literal raw key. Prepending
+		// "SAML%52equest=<forged>" to any captured signed LogoutRequest URL would
+		// then get an arbitrary unsigned message processed (finding H-1). We
+		// therefore reject any non-canonical encoding or duplicate of these
+		// security-relevant keys up front and decode only the verified raw values.
+		params, err := extractRedirectParams(r.URL.RawQuery)
+		if err != nil {
+			slog.Warn("SLO rejected malformed redirect-binding query",
+				"tenant", tenantSlug,
+				"method", r.Method,
+				"error", err,
+			)
+			http.Error(w, "malformed SLO request", http.StatusBadRequest)
+			return
+		}
+
+		encoded := params.samlRequest
 		if encoded == "" {
 			slog.Warn("SLO request missing SAMLRequest parameter",
 				"tenant", tenantSlug,
@@ -115,7 +135,7 @@ func HandleSLO(baseURL string, sessions domain.SessionRepository, apps domain.Ap
 			http.Error(w, "missing SAMLRequest parameter", http.StatusBadRequest)
 			return
 		}
-		relayState := r.URL.Query().Get("RelayState")
+		relayState := params.relayState
 
 		// Decode: base64 -> deflate (bounded) -> XML. On failure return a
 		// generic message to this unauthenticated caller; the underlying error
@@ -194,7 +214,7 @@ func HandleSLO(baseURL string, sessions domain.SessionRepository, apps domain.Ap
 		// Fail closed: if the SP has no registered cert we cannot authenticate
 		// the request, so we reject rather than honor an unverifiable logout.
 		// SHA-1 SigAlgs are accepted only when this SP's tenant explicitly opts in.
-		if err := verifyRedirectSignature(r.URL.RawQuery, samlCfg.SigningCertPem, samlCfg.AllowInsecureSHA1); err != nil {
+		if err := verifyRedirectSignature(params, samlCfg.SigningCertPem, samlCfg.AllowInsecureSHA1); err != nil {
 			slog.Warn("SLO signature verification failed",
 				"tenant", tenantSlug,
 				"issuer", issuer,
@@ -403,34 +423,138 @@ func auditSLORejected(r *http.Request, audit domain.AuditRepository, tenantSlug,
 	}
 }
 
+// redirectBindingParams holds the SAML HTTP-Redirect binding parameters,
+// carrying BOTH the raw (still-percent-encoded) form used to reconstruct the
+// signed octet string and the decoded form used to parse the message. Holding
+// both from a single canonicalized pass guarantees the bytes that are verified
+// and the bytes that are parsed come from the same place (finding H-1).
+type redirectBindingParams struct {
+	// raw query values, exactly as they appeared in RawQuery (percent-encoded).
+	samlRequestRaw string
+	relayStateRaw  string
+	hasRelayState  bool
+	sigAlgRaw      string
+	hasSigAlg      bool
+	signatureRaw   string
+	hasSignature   bool
+
+	// decoded values for message parsing.
+	samlRequest string
+	relayState  string
+}
+
+// canonicalRedirectKeys is the set of security-relevant redirect-binding keys
+// whose raw key bytes must be canonical and which must each appear at most once.
+var canonicalRedirectKeys = map[string]struct{}{
+	"SAMLRequest":  {},
+	"SAMLResponse": {},
+	"RelayState":   {},
+	"SigAlg":       {},
+	"Signature":    {},
+}
+
+// extractRedirectParams walks RawQuery exactly once and extracts the
+// redirect-binding parameters, rejecting the parameter-name-smuggling that
+// finding H-1 exploits. For every key it unescapes the key bytes; if the
+// unescaped key matches one of the canonical SAML keys but the raw key bytes are
+// not the literal canonical form (e.g. "SAML%52equest"), or if any canonical key
+// appears more than once, it returns an error so the caller rejects the request
+// with 400. The returned struct carries the raw values (for signature
+// reconstruction) and the QueryUnescape'd values (for message decoding) so parse
+// and verify operate on the same bytes. r.URL.Query() is never consulted.
+func extractRedirectParams(rawQuery string) (redirectBindingParams, error) {
+	var p redirectBindingParams
+	seen := make(map[string]struct{})
+
+	for pair := range strings.SplitSeq(rawQuery, "&") {
+		if pair == "" {
+			continue
+		}
+		rawKey, rawVal, _ := strings.Cut(pair, "=")
+
+		decodedKey, err := url.QueryUnescape(rawKey)
+		if err != nil {
+			return redirectBindingParams{}, fmt.Errorf("undecodable parameter name %q: %w", rawKey, err)
+		}
+
+		if _, isCanonical := canonicalRedirectKeys[decodedKey]; !isCanonical {
+			// Not a security-relevant key; leave it untouched.
+			continue
+		}
+
+		// The raw key bytes must be exactly the canonical name. Any encoded form
+		// (SAML%52equest, %53AMLRequest, …) that decodes to a canonical key is a
+		// smuggling attempt: it would reach r.URL.Query() but not the raw signed
+		// octet string.
+		if rawKey != decodedKey {
+			return redirectBindingParams{}, fmt.Errorf("non-canonical encoding of parameter %q (raw %q)", decodedKey, rawKey)
+		}
+
+		// Reject duplicates of any canonical key: a second SAMLRequest/Signature/
+		// SigAlg would let the parsed and signed messages diverge.
+		if _, dup := seen[decodedKey]; dup {
+			return redirectBindingParams{}, fmt.Errorf("duplicate parameter %q", decodedKey)
+		}
+		seen[decodedKey] = struct{}{}
+
+		decodedVal, err := url.QueryUnescape(rawVal)
+		if err != nil {
+			return redirectBindingParams{}, fmt.Errorf("undecodable value for %q: %w", decodedKey, err)
+		}
+
+		switch decodedKey {
+		case "SAMLRequest":
+			p.samlRequestRaw = rawVal
+			p.samlRequest = decodedVal
+		case "SAMLResponse":
+			// SLO over the redirect binding only accepts a LogoutRequest here.
+			// A SAMLResponse is not processed, but it must still be rejected as a
+			// duplicate/smuggling vector above; record nothing further.
+		case "RelayState":
+			p.relayStateRaw = rawVal
+			p.relayState = decodedVal
+			p.hasRelayState = true
+		case "SigAlg":
+			p.sigAlgRaw = rawVal
+			p.hasSigAlg = true
+		case "Signature":
+			p.signatureRaw = rawVal
+			p.hasSignature = true
+		}
+	}
+
+	return p, nil
+}
+
 // verifyRedirectSignature validates the HTTP-Redirect binding signature of an
 // inbound SAML message against the SP's registered signing certificate.
 //
 // Per SAML 2.0 bindings §3.4.4.1 the signature covers the octet string
 // "SAMLRequest=<v>&RelayState=<v>&SigAlg=<v>" using the raw, still-percent-encoded
-// query values in that exact order (RelayState omitted when absent). We therefore
-// reconstruct the signed input from r.URL.RawQuery rather than from parsed values,
-// so the bytes match what the SP signed. It fails closed: a missing certificate,
-// a missing SigAlg/Signature, an unsupported algorithm, or an invalid signature
-// all return an error. allowSHA1 gates the legacy SHA-1 SigAlgs (default off,
-// per-tenant opt-in) — see hashForSigAlg.
-func verifyRedirectSignature(rawQuery, certPEM string, allowSHA1 bool) error {
+// query values in that exact order (RelayState omitted when absent). The caller
+// supplies the canonicalized params (extractRedirectParams), which already
+// rejected name smuggling and duplicates, so the raw values here are exactly the
+// bytes the SP signed and the bytes the message was parsed from. It fails closed:
+// a missing certificate, a missing SigAlg/Signature, an unsupported algorithm, or
+// an invalid signature all return an error. allowSHA1 gates the legacy SHA-1
+// SigAlgs (default off, per-tenant opt-in) — see hashForSigAlg.
+func verifyRedirectSignature(params redirectBindingParams, certPEM string, allowSHA1 bool) error {
 	if strings.TrimSpace(certPEM) == "" {
 		return errors.New("SP has no registered signing certificate; SLO requires a signed LogoutRequest")
 	}
 
-	sigAlgRaw, ok := rawQueryParam(rawQuery, "SigAlg")
-	if !ok {
+	if !params.hasSigAlg {
 		return errors.New("missing SigAlg (unsigned request rejected)")
 	}
-	signatureRaw, ok := rawQueryParam(rawQuery, "Signature")
-	if !ok {
+	if !params.hasSignature {
 		return errors.New("missing Signature (unsigned request rejected)")
 	}
-	samlReqRaw, ok := rawQueryParam(rawQuery, "SAMLRequest")
-	if !ok {
+	if params.samlRequestRaw == "" {
 		return errors.New("missing SAMLRequest")
 	}
+	sigAlgRaw := params.sigAlgRaw
+	signatureRaw := params.signatureRaw
+	samlReqRaw := params.samlRequestRaw
 
 	sigAlg, err := url.QueryUnescape(sigAlgRaw)
 	if err != nil {
@@ -447,8 +571,8 @@ func verifyRedirectSignature(rawQuery, certPEM string, allowSHA1 bool) error {
 
 	// Reconstruct the signed octet string from raw (encoded) query values.
 	signed := "SAMLRequest=" + samlReqRaw
-	if relayRaw, ok := rawQueryParam(rawQuery, "RelayState"); ok {
-		signed += "&RelayState=" + relayRaw
+	if params.hasRelayState {
+		signed += "&RelayState=" + params.relayStateRaw
 	}
 	signed += "&SigAlg=" + sigAlgRaw
 
@@ -532,21 +656,6 @@ func parseSigningCert(certPEM string) (*x509.Certificate, error) {
 		return nil, errors.New("no PEM block found")
 	}
 	return x509.ParseCertificate(block.Bytes)
-}
-
-// rawQueryParam returns the raw (still-percent-encoded) value of key from a raw
-// query string, preserving the exact bytes the SP signed. It does not URL-decode.
-func rawQueryParam(rawQuery, key string) (string, bool) {
-	for pair := range strings.SplitSeq(rawQuery, "&") {
-		if pair == "" {
-			continue
-		}
-		k, v, _ := strings.Cut(pair, "=")
-		if k == key {
-			return v, true
-		}
-	}
-	return "", false
 }
 
 // buildLogoutResponse creates a SAML LogoutResponse carrying the given status

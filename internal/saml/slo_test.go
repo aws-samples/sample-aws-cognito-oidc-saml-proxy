@@ -841,6 +841,137 @@ func TestHandleSLO_SHA1_AcceptedWhenOptedIn(t *testing.T) {
 	assert.NotEmpty(t, w.Header().Get("Location"))
 }
 
+// ---------------------------------------------------------------------------
+// H-1: redirect-binding signature bypass via parameter-name smuggling.
+//
+// The handler used to parse the message from r.URL.Query() (which URL-decodes
+// parameter NAMES) while verifying the signature over the literal raw key, so
+// prepending "SAML%52equest=<forged>" to any captured signed LogoutRequest URL
+// got an arbitrary unsigned message processed. The handler now canonicalizes the
+// redirect-binding parameters: any non-canonical encoding of a security-relevant
+// key, or any duplicate of one, is rejected with 400, and only the verified raw
+// values are decoded. These are regression tests ported from the appsec PoC.
+// ---------------------------------------------------------------------------
+
+// TestSLO_RejectsEncodedParamNameSmuggling is the direct port of the H-1 PoC:
+// an attacker-forged, fresh LogoutRequest for a victim SessionIndex is smuggled
+// in under the percent-encoded key "SAML%52equest" (which decodes to
+// "SAMLRequest"), prepended to a genuinely-signed older LogoutRequest URL. On the
+// unfixed handler the forged message was parsed and honored while the signature
+// verified against the original. It must now be rejected (400) and must not be
+// processed as a logout (no 302, no session revocation).
+func TestSLO_RejectsEncodedParamNameSmuggling(t *testing.T) {
+	r, sessionStore, _, spKey := setupSLORouter(t)
+
+	// A genuine, signed LogoutRequest from the SP (any SessionIndex of the
+	// attacker's own). This provides the valid Signature/SigAlg.
+	legit := buildLogoutRequestWith(t, "https://sp.example.com", "attacker@example.com",
+		sloDestination("acme"), "attacker_idx", logoutRequestOpts{id: "_legit"})
+	signedLegit := signedRedirectQuery(t, spKey, legit, "")
+
+	// A forged, UNSIGNED LogoutRequest targeting the victim's session.
+	forged := deflateAndEncode(t, buildLogoutRequestWith(t, "https://sp.example.com", "victim@example.com",
+		sloDestination("acme"), "victim_session_index", logoutRequestOpts{id: "_forged"}))
+
+	// Smuggle the forged value under an encoded key name, then the full signed query.
+	smuggled := "SAML%52equest=" + url.QueryEscape(forged) + "&" + signedLegit
+
+	req := httptest.NewRequest(http.MethodGet, "/t/acme/saml/slo?"+smuggled, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code, "encoded-key smuggling must be rejected, not processed")
+	assert.Contains(t, w.Body.String(), "malformed SLO request")
+
+	// The victim's session must NOT have been revoked by the forged request.
+	revoked, err := sessionStore.IsSessionRevoked(context.Background(), "victim_session_index")
+	require.NoError(t, err)
+	assert.False(t, revoked, "forged (unsigned) LogoutRequest must not revoke the victim session")
+}
+
+// TestSLO_RejectsDuplicateSAMLRequest asserts that two SAMLRequest parameters —
+// one forged, one from a signed URL — are rejected, closing the variant where a
+// duplicate key lets the parsed and signed messages diverge.
+func TestSLO_RejectsDuplicateSAMLRequest(t *testing.T) {
+	r, _, _, spKey := setupSLORouter(t)
+
+	legit := buildLogoutRequestWith(t, "https://sp.example.com", "attacker@example.com",
+		sloDestination("acme"), "attacker_idx", logoutRequestOpts{id: "_legit"})
+	signedLegit := signedRedirectQuery(t, spKey, legit, "")
+
+	forged := deflateAndEncode(t, buildLogoutRequestWith(t, "https://sp.example.com", "victim@example.com",
+		sloDestination("acme"), "victim_session_index", logoutRequestOpts{id: "_forged"}))
+
+	// Prepend a second, canonically-named SAMLRequest.
+	dup := "SAMLRequest=" + url.QueryEscape(forged) + "&" + signedLegit
+
+	req := httptest.NewRequest(http.MethodGet, "/t/acme/saml/slo?"+dup, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "malformed SLO request")
+}
+
+// TestSLO_RejectsDuplicateSignature asserts that a duplicated Signature
+// parameter is rejected rather than silently resolved to the first match.
+func TestSLO_RejectsDuplicateSignature(t *testing.T) {
+	r, _, _, spKey := setupSLORouter(t)
+
+	xmlStr := buildLogoutRequest(t, "https://sp.example.com", "user@example.com", sloDestination("acme"), "")
+	signed := signedRedirectQuery(t, spKey, xmlStr, "")
+
+	// Append a second Signature value.
+	dup := signed + "&Signature=" + url.QueryEscape(base64.StdEncoding.EncodeToString([]byte("second-signature")))
+
+	req := httptest.NewRequest(http.MethodGet, "/t/acme/saml/slo?"+dup, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "malformed SLO request")
+}
+
+// TestSLO_RejectsDuplicateSigAlg asserts that a duplicated SigAlg parameter is
+// rejected (a second SigAlg could otherwise shift which algorithm is verified
+// versus which is signed).
+func TestSLO_RejectsDuplicateSigAlg(t *testing.T) {
+	r, _, _, spKey := setupSLORouter(t)
+
+	xmlStr := buildLogoutRequest(t, "https://sp.example.com", "user@example.com", sloDestination("acme"), "")
+	signed := signedRedirectQuery(t, spKey, xmlStr, "")
+
+	dup := signed + "&SigAlg=" + url.QueryEscape(sigAlgRSASHA256)
+
+	req := httptest.NewRequest(http.MethodGet, "/t/acme/saml/slo?"+dup, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "malformed SLO request")
+}
+
+// TestSLO_RejectsEncodedRelayStateSwap asserts that smuggling a second
+// RelayState under an encoded key name ("RelayStat%65") is rejected, so an
+// attacker cannot swap the RelayState the SP sees while leaving the signature
+// over the original one.
+func TestSLO_RejectsEncodedRelayStateSwap(t *testing.T) {
+	r, _, _, spKey := setupSLORouter(t)
+
+	xmlStr := buildLogoutRequest(t, "https://sp.example.com", "user@example.com", sloDestination("acme"), "")
+	signed := signedRedirectQuery(t, spKey, xmlStr, "legit-relay")
+
+	// Prepend an encoded-key RelayState carrying an attacker value.
+	swapped := "RelayStat%65=" + url.QueryEscape("attacker-relay") + "&" + signed
+
+	req := httptest.NewRequest(http.MethodGet, "/t/acme/saml/slo?"+swapped, nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "malformed SLO request")
+}
+
 // inflate decompresses deflate-compressed data.
 func inflate(data []byte) ([]byte, error) {
 	reader := flate.NewReader(strings.NewReader(string(data)))
