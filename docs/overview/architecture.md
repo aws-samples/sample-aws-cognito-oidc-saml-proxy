@@ -63,7 +63,8 @@ Core regional resources sitting behind the edge.
   console, and it acts as an upstream identity source whose users and `cognito:groups`
   are federated out as SAML assertions or OIDC tokens.
 - **ECR** — holds the container images for the Lambda functions (one repository per
-  function, 8 total). Lambda pulls its image from ECR at deploy time.
+  function: 8 gateway + 2 demo = 10 total). Lambda pulls its image from ECR at deploy
+  time.
 
 ### Lambda — per-capability functions (arm64 containers)
 

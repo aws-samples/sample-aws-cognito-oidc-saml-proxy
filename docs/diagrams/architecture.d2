@@ -84,7 +84,7 @@ aws: "AWS Cloud" {
       style.stroke: "#7D8998"
       style.font-color: "#232F3E"
     }
-    ecr: "ECR\nLambda images (8 repos)" {
+    ecr: "ECR\nLambda images\n10 repos (8 gateway + 2 demo)" {
       icon: icons/aws/ecr.svg
       icon.near: top-center
       label.near: bottom-center
@@ -93,6 +93,12 @@ aws: "AWS Cloud" {
       style.font-color: "#232F3E"
     }
     compute: "Lambda — per-capability functions (arm64 containers)" {
+      compute_badge: "" {
+        icon: ../images/icons/Res_Identity-Federation-Gateway_48_Light.svg
+        shape: image
+        width: 32
+        height: 32
+      }
       style.stroke: "#7D8998"
       style.fill: "#F7F8F8"
       l_saml_sso: "saml-sso" {
@@ -420,6 +426,18 @@ aws.region.data.ddb_config -> aws.region.security.kms_enc: "SSE" {
   style.stroke-dash: 4
 }
 aws.region.ecr -> aws.region.compute.l_saml_sso: "image pull" {
+  style.stroke: "#7D8998"
+  style.font-color: "#232F3E"
+  style.fill: "#FFFFFF"
+  style.stroke-dash: 4
+}
+aws.region.ecr -> aws.region.demo.demo_saml: "image pull" {
+  style.stroke: "#7D8998"
+  style.font-color: "#232F3E"
+  style.fill: "#FFFFFF"
+  style.stroke-dash: 4
+}
+aws.region.ecr -> aws.region.demo.demo_oidc: "image pull" {
   style.stroke: "#7D8998"
   style.font-color: "#232F3E"
   style.fill: "#FFFFFF"

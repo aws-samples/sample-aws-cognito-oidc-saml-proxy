@@ -13,7 +13,7 @@
     { "id": "s3spa", "label": "S3 — Admin\nConsole SPA (OAC)", "icon": "docs/diagrams/icons/aws/s3.svg" },
     { "id": "apigw", "label": "API Gateway (HTTP)\nCognito JWT authorizer", "icon": "docs/diagrams/icons/aws/api-gateway.svg" },
     { "id": "cognito", "label": "Cognito User Pool\nadmin + identity source", "icon": "docs/diagrams/icons/aws/cognito.svg" },
-    { "id": "ecr", "label": "ECR\nLambda images (8 repos)", "icon": "docs/diagrams/icons/aws/ecr.svg" },
+    { "id": "ecr", "label": "ECR\nLambda images\n10 repos (8 gateway + 2 demo)", "icon": "docs/diagrams/icons/aws/ecr.svg" },
 
     { "id": "l_saml_sso", "label": "saml-sso", "icon": "docs/diagrams/icons/aws/lambda.svg" },
     { "id": "l_saml_slo", "label": "saml-slo", "icon": "docs/diagrams/icons/aws/lambda.svg" },
@@ -71,6 +71,8 @@
 
     { "from": "ddb_config", "to": "kms_enc", "label": "SSE", "style": "dashed", "color": "#DD344C" },
     { "from": "ecr", "to": "l_saml_sso", "label": "image pull", "style": "dashed", "color": "#7D8998" },
+    { "from": "ecr", "to": "demo_saml", "label": "image pull", "style": "dashed", "color": "#7D8998" },
+    { "from": "ecr", "to": "demo_oidc", "label": "image pull", "style": "dashed", "color": "#7D8998" },
 
     { "from": "eventbridge", "to": "l_health", "label": "every 5 min", "style": "dashed", "color": "#FF9900" },
     { "from": "apigw", "to": "alarms", "label": "API/DDB metrics", "style": "dashed", "color": "#7D8998" },
@@ -107,6 +109,8 @@
               "id": "compute",
               "label": "Lambda — per-capability functions (arm64 containers)",
               "type": "generic",
+              "icon": "docs/images/icons/Res_Identity-Federation-Gateway_48_Light.svg",
+              "icon_dark": "docs/images/icons/Res_Identity-Federation-Gateway_48_Dark.svg",
               "nodes": ["l_saml_sso", "l_saml_slo", "l_saml_meta", "l_oidc_auth", "l_oidc_token", "l_oidc_disc", "l_mgmt", "l_health"]
             },
             {
