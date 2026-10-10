@@ -96,3 +96,11 @@ scan-results/
 
 # MkDocs build output
 site/
+
+# Presentation working folder (aws-deck build.py, .pptx, renders, journey HTML)
+presentation/
+# Stray aws-deck render output when a build runs from the repo root
+render/
+
+# Agent workflow working notes (task reports, security reviews); never publish
+.agents/

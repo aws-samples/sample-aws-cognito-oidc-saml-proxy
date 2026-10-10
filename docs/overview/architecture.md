@@ -12,6 +12,28 @@ An editable draw.io version of the same architecture is available at
 ([rendered PNG](../images/identity-federation-gateway.png)).
 The sections below describe each component shown, grouped the same way as the diagram.
 
+## Gateway icon
+
+![Identity Federation Gateway icon](../images/icons/Res_Identity-Federation-Gateway_48_Light.png){ width="96" }
+
+This is the icon for the Identity Federation Gateway. It shows two open doors, for the
+gateway, with a user standing in the doorway, for identity. Use it wherever the gateway
+appears as one component: architecture diagrams, web pages, and presentations. Don't
+use the generic AWS Lambda or API Gateway icons to stand for the whole gateway. Use
+those only when a diagram shows the individual Lambda functions or the HTTP API on
+their own.
+
+| File | Use on |
+|---|---|
+| [`Res_Identity-Federation-Gateway_48_Dark.svg`](../images/icons/Res_Identity-Federation-Gateway_48_Dark.svg) (white lines) | Dark backgrounds, such as dark slide themes and dark web pages |
+| [`Res_Identity-Federation-Gateway_48_Light.svg`](../images/icons/Res_Identity-Federation-Gateway_48_Light.svg) (`#242F3E` lines) | Light backgrounds, such as draw.io, light slides, and docs pages |
+| `Res_Identity-Federation-Gateway_48_{Dark,Light}.png` | Tools that can't import SVG (512 × 512 px, transparent background) |
+
+The icon follows the AWS resource-icon style: a 48 × 48 grid, 2 px lines, and no
+coloured tile. Without the tile, nobody will mistake it for an AWS service icon. Don't
+add a tile, recolour it, or redraw it. Size it like other resource icons, and label it
+"Identity Federation Gateway" (or "Gateway" where space is tight).
+
 ## Actors
 
 - **Platform Admin** — operator who manages tenants, identity sources, applications,

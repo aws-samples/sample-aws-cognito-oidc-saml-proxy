@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Identity Federation Gateway architecture icon (Light variant: for light backgrounds).
+     AWS resource-icon style: 48 x 48 grid, 2 px line, no tile. Open doors (gateway) with a user (identity) in the doorway.
+     Usage rules: docs/overview/architecture.md#gateway-icon -->
+<svg width="48px" height="48px" viewBox="0 0 48 48" version="1.1" xmlns="http://www.w3.org/2000/svg">
+    <title>Res_Identity-Federation-Gateway_48_Light</title>
+    <g fill="none" stroke="#242F3E" stroke-width="2" stroke-linejoin="round">
+        <path d="M3,10.5 L15,3.5 V44.5 L3,38.5 Z"/>
+        <path d="M45,10.5 L33,3.5 V44.5 L45,38.5 Z"/>
+        <path d="M19,9 H22 M26,9 H29 M19,39 H22 M26,39 H29"/>
+        <circle cx="24" cy="18.5" r="4"/>
+        <path d="M18,34 C18,28 20.5,25.5 24,25.5 C27.5,25.5 30,28 30,34 Z"/>
+    </g>
+</svg>
