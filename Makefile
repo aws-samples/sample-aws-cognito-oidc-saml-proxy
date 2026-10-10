@@ -1,4 +1,4 @@
-.PHONY: build test test-integration test-e2e lint clean docker-build fmt vet frontend-install frontend-build frontend-deploy frontend-dev frontend-lint generate-types build-all lint-all build-all-lambdas docker-build-all security-scan security-scan-strict registry-init registry-apply push-function-images push-demo-images gateway-init gateway-apply demo-init demo-apply deploy-dev registry-destroy gateway-destroy demo-destroy destroy-dev post-install tf-init tf-plan tf-validate
+.PHONY: build test test-integration test-e2e lint clean docker-build fmt vet frontend-install frontend-build frontend-deploy frontend-dev frontend-lint generate-types build-all lint-all build-all-lambdas docker-build-all security-scan security-scan-strict registry-init registry-apply push-function-images push-demo-images gateway-init gateway-apply demo-init demo-apply deploy-dev registry-destroy gateway-destroy demo-destroy destroy-dev post-install tf-init tf-plan tf-validate render-diagrams
 
 BINARY_NAME := proxy
 BUILD_DIR := bin
@@ -108,6 +108,28 @@ vet:
 clean:
 	rm -rf $(BUILD_DIR) coverage.out coverage.html
 
+# Regenerate architecture diagrams: JSON -> D2 -> SVG -> PNG.
+# Needs python3, d2 (0.7.1) and rsvg-convert (librsvg). The intermediate .d2
+# files are committed for review. Icons are local files under
+# docs/diagrams/icons/aws/ and docs/images/icons/ (d2 has no bare-name icon
+# lookup). PNGs come from rsvg-convert, never `d2 --png` (that downloads a
+# Playwright browser driver). The .drawio source
+# (docs/diagrams/identity-federation-gateway.drawio) is edited by hand as a
+# separate step: the drawio CLI is not part of this toolchain.
+# PNG widths keep file sizes in budget (simple <= 150 KB, detailed <= 400 KB).
+DIAGRAMS := docs/diagrams
+DIAGRAM_IMAGES := docs/images
+JSON_TO_D2 := python3 scripts/render-diagrams/json_to_d2.py
+render-diagrams:
+	$(JSON_TO_D2) $(DIAGRAMS)/architecture.json -o $(DIAGRAMS)/architecture.d2 --theme light
+	$(JSON_TO_D2) $(DIAGRAMS)/architecture-simple.json -o $(DIAGRAMS)/architecture-simple.d2 --theme light
+	$(JSON_TO_D2) $(DIAGRAMS)/architecture-simple.json -o $(DIAGRAMS)/architecture-simple-dark.d2 --theme dark
+	d2 $(DIAGRAMS)/architecture.d2 $(DIAGRAM_IMAGES)/architecture.svg
+	d2 $(DIAGRAMS)/architecture-simple.d2 $(DIAGRAM_IMAGES)/architecture-simple.svg
+	d2 $(DIAGRAMS)/architecture-simple-dark.d2 $(DIAGRAM_IMAGES)/architecture-simple-dark.svg
+	rsvg-convert --width=3200 $(DIAGRAM_IMAGES)/architecture.svg -o $(DIAGRAM_IMAGES)/architecture.png
+	rsvg-convert --width=1100 $(DIAGRAM_IMAGES)/architecture-simple.svg -o $(DIAGRAM_IMAGES)/architecture-simple.png
+	rsvg-convert --width=1100 $(DIAGRAM_IMAGES)/architecture-simple-dark.svg -o $(DIAGRAM_IMAGES)/architecture-simple-dark.png
 # Run the local security scanner suite (mirrors the Probe/Holmes CI jobs).
 # Gates on ERROR/HIGH+ findings; results written to scan-results/ (gitignored).
 security-scan:
