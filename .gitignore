@@ -10,7 +10,8 @@ go.work
 go.work.sum
 bin/
 dist/
-proxy
+# Root-level binary from `go build ./cmd/proxy` (anchored so cmd/proxy/ source stays tracked)
+/proxy
 /fedctl
 scripts/test-sp/test-sp
 scripts/test-rp/test-rp
