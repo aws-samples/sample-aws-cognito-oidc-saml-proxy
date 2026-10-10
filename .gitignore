@@ -105,3 +105,6 @@ render/
 
 # Agent workflow working notes (task reports, security reviews); never publish
 .agents/
+
+# Git worktrees used for isolated feature work; local-only checkouts
+.worktrees/
