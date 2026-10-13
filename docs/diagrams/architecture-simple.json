@@ -1,0 +1,33 @@
+{
+  "direction": "TB",
+  "layout": "dagre",
+  "theme": "light",
+  "style": "formal",
+  "font_size": 22,
+  "edge_font_size": 20,
+  "nodes": [
+    { "id": "browser", "label": "User (browser)", "icon": "docs/diagrams/icons/aws/users.svg", "icon_dark": "docs/diagrams/icons/aws/users-dark.svg" },
+    { "id": "console", "label": "Admin Console", "icon": "docs/diagrams/icons/aws/users.svg", "icon_dark": "docs/diagrams/icons/aws/users-dark.svg" },
+    { "id": "customlogin", "label": "Custom Login (optional)", "icon": "docs/diagrams/icons/aws/cloudfront.svg", "style": "dashed" },
+    {
+      "id": "gateway",
+      "label": "Identity Federation Gateway",
+      "icon": "docs/images/icons/Res_Identity-Federation-Gateway_48_Light.svg",
+      "icon_dark": "docs/images/icons/Res_Identity-Federation-Gateway_48_Dark.svg"
+    },
+    { "id": "apps", "label": "SAML SPs / OIDC RPs", "icon": "docs/diagrams/icons/aws/users.svg", "icon_dark": "docs/diagrams/icons/aws/users-dark.svg" },
+    { "id": "cognito", "label": "Amazon Cognito", "icon": "docs/diagrams/icons/aws/cognito.svg" }
+  ],
+  "edges": [
+    { "from": "browser", "to": "gateway", "label": "SSO", "color": "#FF9900", "weight": "10" },
+    { "from": "browser", "to": "customlogin", "label": "custom login (optional)", "style": "dashed", "color": "#01A88D" },
+    { "from": "customlogin", "to": "cognito", "label": "auth", "style": "dashed", "color": "#01A88D" },
+    { "from": "customlogin", "to": "gateway", "label": "hand off ID token", "style": "dashed", "color": "#01A88D" },
+    { "from": "browser", "to": "console", "label": "manage", "color": "#8C4FFF" },
+    { "from": "console", "to": "gateway", "label": "admin API", "color": "#8C4FFF" },
+    { "from": "gateway", "to": "cognito", "label": "federation", "color": "#DD344C", "weight": "10" },
+    { "from": "gateway", "to": "apps", "label": "SAML / OIDC", "color": "#527FFF", "dir": "back" },
+    { "from": "gateway", "to": "apps", "label": "assertions / tokens", "color": "#527FFF" }
+  ],
+  "clusters": []
+}

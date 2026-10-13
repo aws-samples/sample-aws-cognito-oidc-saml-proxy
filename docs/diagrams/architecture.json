@@ -4,44 +4,44 @@
   "theme": "light",
   "style": "formal",
   "nodes": [
-    { "id": "admin", "label": "Platform\nAdmin", "icon": "Users" },
-    { "id": "enduser", "label": "End User", "icon": "Users" },
+    { "id": "admin", "label": "Platform\nAdmin", "icon": "docs/diagrams/icons/aws/users.svg" },
+    { "id": "enduser", "label": "End User", "icon": "docs/diagrams/icons/aws/users.svg" },
 
-    { "id": "waf", "label": "AWS WAF\nOWASP + rate limits", "icon": "WAF" },
-    { "id": "cf", "label": "CloudFront\nSPA + API + CSP", "icon": "CloudFront" },
+    { "id": "waf", "label": "AWS WAF\nOWASP + rate limits", "icon": "docs/diagrams/icons/aws/waf.svg" },
+    { "id": "cf", "label": "CloudFront\nSPA + API + CSP", "icon": "docs/diagrams/icons/aws/cloudfront.svg" },
 
-    { "id": "s3spa", "label": "S3 — Admin\nConsole SPA (OAC)", "icon": "Simple Storage Service" },
-    { "id": "apigw", "label": "API Gateway (HTTP)\nCognito JWT authorizer", "icon": "API Gateway" },
-    { "id": "cognito", "label": "Cognito User Pool\nadmin + identity source", "icon": "Cognito" },
-    { "id": "ecr", "label": "ECR\nLambda images (8 repos)", "icon": "Elastic Container Registry" },
+    { "id": "s3spa", "label": "S3 — Admin\nConsole SPA (OAC)", "icon": "docs/diagrams/icons/aws/s3.svg" },
+    { "id": "apigw", "label": "API Gateway (HTTP)\nCognito JWT authorizer", "icon": "docs/diagrams/icons/aws/api-gateway.svg" },
+    { "id": "cognito", "label": "Cognito User Pool\nadmin + identity source", "icon": "docs/diagrams/icons/aws/cognito.svg" },
+    { "id": "ecr", "label": "ECR\nLambda images\n10 repos (8 gateway + 2 demo)", "icon": "docs/diagrams/icons/aws/ecr.svg" },
 
-    { "id": "l_saml_sso", "label": "saml-sso", "icon": "Lambda" },
-    { "id": "l_saml_slo", "label": "saml-slo", "icon": "Lambda" },
-    { "id": "l_saml_meta", "label": "saml-metadata", "icon": "Lambda" },
-    { "id": "l_oidc_auth", "label": "oidc-authorize", "icon": "Lambda" },
-    { "id": "l_oidc_token", "label": "oidc-token", "icon": "Lambda" },
-    { "id": "l_oidc_disc", "label": "oidc-discovery", "icon": "Lambda" },
-    { "id": "l_mgmt", "label": "management-api", "icon": "Lambda" },
-    { "id": "l_health", "label": "health", "icon": "Lambda" },
+    { "id": "l_saml_sso", "label": "saml-sso", "icon": "docs/diagrams/icons/aws/lambda.svg" },
+    { "id": "l_saml_slo", "label": "saml-slo", "icon": "docs/diagrams/icons/aws/lambda.svg" },
+    { "id": "l_saml_meta", "label": "saml-metadata", "icon": "docs/diagrams/icons/aws/lambda.svg" },
+    { "id": "l_oidc_auth", "label": "oidc-authorize", "icon": "docs/diagrams/icons/aws/lambda.svg" },
+    { "id": "l_oidc_token", "label": "oidc-token", "icon": "docs/diagrams/icons/aws/lambda.svg" },
+    { "id": "l_oidc_disc", "label": "oidc-discovery", "icon": "docs/diagrams/icons/aws/lambda.svg" },
+    { "id": "l_mgmt", "label": "management-api", "icon": "docs/diagrams/icons/aws/lambda.svg" },
+    { "id": "l_health", "label": "health", "icon": "docs/diagrams/icons/aws/lambda.svg" },
 
-    { "id": "ddb_config", "label": "DynamoDB\nconfig (single-table)", "icon": "DynamoDB" },
-    { "id": "ddb_session", "label": "DynamoDB\nsession (TTL)", "icon": "DynamoDB" },
-    { "id": "s3iac", "label": "S3 — IaC\ntemplates", "icon": "Simple Storage Service" },
+    { "id": "ddb_config", "label": "DynamoDB\nconfig (single-table)", "icon": "docs/diagrams/icons/aws/dynamodb.svg" },
+    { "id": "ddb_session", "label": "DynamoDB\nsession (TTL)", "icon": "docs/diagrams/icons/aws/dynamodb.svg" },
+    { "id": "s3iac", "label": "S3 — IaC\ntemplates", "icon": "docs/diagrams/icons/aws/s3.svg" },
 
-    { "id": "kms_sign", "label": "KMS — signing\nRSA (SAML/OIDC)", "icon": "Key Management Service" },
-    { "id": "kms_backup", "label": "KMS — backup\nsigning (optional)", "icon": "Key Management Service" },
-    { "id": "kms_enc", "label": "KMS — encryption\nsymmetric", "icon": "Key Management Service" },
+    { "id": "kms_sign", "label": "KMS — signing\nRSA (SAML/OIDC)", "icon": "docs/diagrams/icons/aws/kms.svg" },
+    { "id": "kms_backup", "label": "KMS — backup\nsigning (optional)", "icon": "docs/diagrams/icons/aws/kms.svg" },
+    { "id": "kms_enc", "label": "KMS — encryption\nsymmetric", "icon": "docs/diagrams/icons/aws/kms.svg" },
 
-    { "id": "cwlogs", "label": "CloudWatch Logs\naudit trail", "icon": "CloudWatch" },
-    { "id": "alarms", "label": "CloudWatch\nAlarms", "icon": "CloudWatch_Alarm" },
-    { "id": "sns", "label": "SNS\nemail alerts", "icon": "Simple Notification Service" },
-    { "id": "eventbridge", "label": "EventBridge\nhealth schedule", "icon": "EventBridge" },
+    { "id": "cwlogs", "label": "CloudWatch Logs\naudit trail", "icon": "docs/diagrams/icons/aws/cloudwatch.svg" },
+    { "id": "alarms", "label": "CloudWatch\nAlarms", "icon": "docs/diagrams/icons/aws/cloudwatch-alarm.svg" },
+    { "id": "sns", "label": "SNS\nemail alerts", "icon": "docs/diagrams/icons/aws/sns.svg" },
+    { "id": "eventbridge", "label": "EventBridge\nhealth schedule", "icon": "docs/diagrams/icons/aws/eventbridge.svg" },
 
-    { "id": "demo_saml", "label": "Demo SAML SP\nLambda + API GW + CF", "icon": "Lambda" },
-    { "id": "demo_oidc", "label": "Demo OIDC RP\nLambda + API GW + CF", "icon": "Lambda" },
+    { "id": "demo_saml", "label": "Demo SAML SP\nLambda + API GW + CF", "icon": "docs/diagrams/icons/aws/lambda.svg" },
+    { "id": "demo_oidc", "label": "Demo OIDC RP\nLambda + API GW + CF", "icon": "docs/diagrams/icons/aws/lambda.svg" },
 
-    { "id": "cui_cf", "label": "CloudFront\n+ optional IP WAF", "icon": "CloudFront" },
-    { "id": "cui_s3", "label": "S3 (private, OAC)\ncustom login SPA", "icon": "Simple Storage Service" }
+    { "id": "cui_cf", "label": "CloudFront\n+ optional IP WAF", "icon": "docs/diagrams/icons/aws/cloudfront.svg" },
+    { "id": "cui_s3", "label": "S3 (private, OAC)\ncustom login SPA", "icon": "docs/diagrams/icons/aws/s3.svg" }
   ],
   "edges": [
     { "from": "admin", "to": "cf", "label": "console (HTTPS)", "color": "#FF9900", "weight": "10" },
@@ -71,6 +71,8 @@
 
     { "from": "ddb_config", "to": "kms_enc", "label": "SSE", "style": "dashed", "color": "#DD344C" },
     { "from": "ecr", "to": "l_saml_sso", "label": "image pull", "style": "dashed", "color": "#7D8998" },
+    { "from": "ecr", "to": "demo_saml", "label": "image pull", "style": "dashed", "color": "#7D8998" },
+    { "from": "ecr", "to": "demo_oidc", "label": "image pull", "style": "dashed", "color": "#7D8998" },
 
     { "from": "eventbridge", "to": "l_health", "label": "every 5 min", "style": "dashed", "color": "#FF9900" },
     { "from": "apigw", "to": "alarms", "label": "API/DDB metrics", "style": "dashed", "color": "#7D8998" },
@@ -107,6 +109,8 @@
               "id": "compute",
               "label": "Lambda — per-capability functions (arm64 containers)",
               "type": "generic",
+              "icon": "docs/images/icons/Res_Identity-Federation-Gateway_48_Light.svg",
+              "icon_dark": "docs/images/icons/Res_Identity-Federation-Gateway_48_Dark.svg",
               "nodes": ["l_saml_sso", "l_saml_slo", "l_saml_meta", "l_oidc_auth", "l_oidc_token", "l_oidc_disc", "l_mgmt", "l_health"]
             },
             {
