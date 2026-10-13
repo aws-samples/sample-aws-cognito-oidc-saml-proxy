@@ -18,7 +18,12 @@ export const appOverviewHelp: HelpContent = {
         <li><strong>Overview</strong> — identity, protocol, status, and bound source.</li>
         <li><strong>Protocol</strong> — SAML or OIDC settings (endpoints, signing, lifetimes).</li>
         <li><strong>Custom login</strong> — optionally replace the Cognito Hosted UI with your own login page.</li>
-        <li><strong>Mappings</strong> — claim and role mappings released to the app.</li>
+        <li>
+          <strong>Mappings</strong> — claim and role mappings released to the app. An SP
+          receives <em>only</em> the attributes mapped here; unmapped Cognito attributes,
+          raw groups and library defaults are never released, and an app with no mappings
+          gets a Subject-only assertion.
+        </li>
         <li><strong>Integration</strong> — copy/paste endpoints, certificate, and quick-start snippets to configure the app.</li>
       </ul>
       <h3>Status</h3>

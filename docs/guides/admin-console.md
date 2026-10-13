@@ -20,6 +20,11 @@ NameID formats, redirect URIs, and token lifetimes.
 Map source attributes and `cognito:groups` to per-application SAML attributes or OIDC
 claims — declaratively, without writing Lambda code.
 
+A SAML application receives **only** the attributes mapped here: unmapped Cognito
+attributes, raw groups and library default attributes are never released, and an
+application with no mappings receives a Subject-only assertion (no `AttributeStatement`).
+Use **Preview** to see exactly what a test user would receive.
+
 ![Claim mappings](../images/admin-claim-mappings.png)
 
 ## Integration details

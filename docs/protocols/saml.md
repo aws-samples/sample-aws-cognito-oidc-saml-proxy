@@ -72,6 +72,22 @@ without a `sub` is rejected (HTTP 401). Pairwise (per-SP hashed) persistent iden
 are not issued: they would require a secret that is never rotated, which the deployment
 does not provision.
 
+## Attribute release
+
+A service provider receives **only** the attributes an administrator has mapped for that
+application (claim mappings and group-to-role mappings). The gateway never emits the
+crewjam/library default attribute set (`uid`, `mail`, `givenName`, `sn`,
+`eduPersonPrincipalName`, `eduPersonAffiliation`, `subject-id`), the user's raw
+`cognito:groups`, or any `custom:*` attribute that is not explicitly mapped. An application
+with no mappings receives a Subject-only assertion with no `<AttributeStatement>` at all.
+If the application or its mappings cannot be resolved for a request, nothing is released
+and a warning is logged — the gateway does not fall back to the defaults.
+
+Mappings whose source type is `cognito` (or its wizard alias `attribute`) read a Cognito
+claim (`email`, `given_name`, `family_name`, `sub`, `username`, or a `custom:*` attribute
+by its name without the prefix); `groupMapping` releases the role values mapped from the
+user's groups; `static` releases a fixed value.
+
 ## Custom login and IdP-initiated SSO
 
 An application may replace the Cognito Managed Login with its own login page

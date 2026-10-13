@@ -92,8 +92,10 @@ func buildSAMLPreview(claimMappings []tenant.ClaimMapping, roleMap map[string]st
 	for _, cm := range claimMappings {
 		var values []string
 
-		switch cm.SourceType {
-		case "cognito":
+		// "attribute" is the wizard's alias for "cognito"; the preview must
+		// resolve it exactly like the assertion maker does.
+		switch {
+		case tenant.IsCognitoSource(cm.SourceType):
 			val := resolveTestUserField(cm.SourceAttribute, testUserData)
 			if val == "" && cm.DefaultValue != "" {
 				val = cm.DefaultValue
@@ -102,14 +104,14 @@ func buildSAMLPreview(claimMappings []tenant.ClaimMapping, roleMap map[string]st
 				values = append(values, val)
 			}
 
-		case "groupMapping":
+		case cm.SourceType == "groupMapping":
 			for _, group := range groups {
 				if mapped, ok := roleMap[group]; ok {
 					values = append(values, mapped)
 				}
 			}
 
-		case "static":
+		case cm.SourceType == "static":
 			if cm.DefaultValue != "" {
 				values = append(values, cm.DefaultValue)
 			}
@@ -140,8 +142,8 @@ func buildOIDCPreview(claimMappings []tenant.ClaimMapping, roleMap map[string]st
 	for _, cm := range claimMappings {
 		var value interface{}
 
-		switch cm.SourceType {
-		case "cognito":
+		switch {
+		case tenant.IsCognitoSource(cm.SourceType):
 			val := resolveTestUserField(cm.SourceAttribute, testUserData)
 			if val == "" && cm.DefaultValue != "" {
 				val = cm.DefaultValue
@@ -150,7 +152,7 @@ func buildOIDCPreview(claimMappings []tenant.ClaimMapping, roleMap map[string]st
 				value = val
 			}
 
-		case "groupMapping":
+		case cm.SourceType == "groupMapping":
 			var mappedValues []string
 			for _, group := range groups {
 				if mapped, ok := roleMap[group]; ok {
@@ -161,7 +163,7 @@ func buildOIDCPreview(claimMappings []tenant.ClaimMapping, roleMap map[string]st
 				value = mappedValues
 			}
 
-		case "static":
+		case cm.SourceType == "static":
 			if cm.DefaultValue != "" {
 				value = cm.DefaultValue
 			}

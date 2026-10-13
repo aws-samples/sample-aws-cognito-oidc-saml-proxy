@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -250,6 +251,7 @@ func TestAssertionMaker_UnknownEntityID_SkipsCustomAttributes(t *testing.T) {
 	}
 
 	req := &saml.IdpAuthnRequest{
+		HTTPRequest: httpRequestForTenant("acme"),
 		ServiceProviderMetadata: &saml.EntityDescriptor{
 			EntityID: "https://unknown.example.com/saml",
 		},
@@ -261,8 +263,206 @@ func TestAssertionMaker_UnknownEntityID_SkipsCustomAttributes(t *testing.T) {
 
 	err := maker.MakeAssertion(req, session)
 	require.NoError(t, err, "should succeed even with unknown entity ID")
-	// No extra attributes added.
-	assert.Empty(t, req.Assertion.AttributeStatements[0].Attributes)
+	// An unresolvable app releases nothing: no AttributeStatement at all (and
+	// certainly not the pre-populated / default one).
+	assert.Empty(t, req.Assertion.AttributeStatements)
+}
+
+// richSession is a session carrying every kind of user data the gateway knows
+// about, so a test can prove that only the mapped parts are released.
+func richSession() *saml.Session {
+	return &saml.Session{
+		ID:            "sess-1",
+		NameID:        "user@example.com",
+		NameIDFormat:  tenant.NameIDFormatEmail,
+		SubjectID:     "sub-123",
+		UserName:      "sub-123",
+		UserEmail:     "user@example.com",
+		UserGivenName: "Jane",
+		UserSurname:   "Doe",
+		Groups:        []string{"Admins", "Viewers"},
+		CustomAttributes: []saml.Attribute{
+			{Name: "department", Values: []saml.AttributeValue{{Value: "Engineering"}}},
+			{Name: "cost_center", Values: []saml.AttributeValue{{Value: "CC-42"}}},
+		},
+	}
+}
+
+// defaultMakerRequest builds an IdpAuthnRequest with NO pre-populated
+// assertion, so MakeAssertion runs crewjam's DefaultAssertionMaker first —
+// which is exactly what emits the default attribute set in production.
+func defaultMakerRequest(t *testing.T) *saml.IdpAuthnRequest {
+	t.Helper()
+	signer, cert := generateTestCert(t)
+	return &saml.IdpAuthnRequest{
+		IDP: &saml.IdentityProvider{
+			Key:         signer,
+			Certificate: cert,
+			MetadataURL: mustURL(t, "https://idp.example.com/t/acme/saml/metadata"),
+			SSOURL:      mustURL(t, "https://idp.example.com/t/acme/saml/sso"),
+		},
+		HTTPRequest: httpRequestForTenant("acme"),
+		ServiceProviderMetadata: &saml.EntityDescriptor{
+			EntityID: "https://sp.example.com/saml",
+		},
+		SPSSODescriptor: &saml.SPSSODescriptor{},
+		ACSEndpoint: &saml.IndexedEndpoint{
+			Binding:  saml.HTTPPostBinding,
+			Location: "https://sp.example.com/saml/acs",
+		},
+		Request: saml.AuthnRequest{ID: "_req-1", IssueInstant: time.Now()},
+		Now:     time.Now(),
+	}
+}
+
+// crewjam DefaultAssertionMaker attribute names that must never reach an SP
+// unless an administrator mapped them.
+var crewjamDefaultAttributeNames = []string{
+	"urn:oid:0.9.2342.19200300.100.1.1", // uid
+	"urn:oid:1.3.6.1.4.1.5923.1.1.1.6",  // eduPersonPrincipalName
+	"urn:oid:0.9.2342.19200300.100.1.3", // mail
+	"urn:oid:2.5.4.42",                  // givenName
+	"urn:oid:2.5.4.4",                   // sn
+	"urn:oid:2.5.4.3",                   // cn
+	"urn:oid:1.3.6.1.4.1.5923.1.1.1.1",  // eduPersonAffiliation
+	"urn:oasis:names:tc:SAML:attribute:subject-id",
+}
+
+// TestAssertionMaker_ReleasesOnlyMappedAttributes is the M-7 regression: with
+// a rich session and a single mapping (email -> a custom target name), the
+// assertion carries exactly that one attribute. None of crewjam's defaults, the
+// raw groups or the unmapped custom:* attributes leak.
+func TestAssertionMaker_ReleasesOnlyMappedAttributes(t *testing.T) {
+	appStore, claimStore, appID := newAssertionTestFixture(t)
+	require.NoError(t, claimStore.PutClaimMappings(context.Background(), "acme", appID, []tenant.ClaimMapping{
+		{Name: "email", SourceType: "cognito", SourceAttribute: "email", TargetAttribute: "https://app.example.com/email"},
+	}))
+	// Role mappings exist, but no groupMapping claim releases them.
+	require.NoError(t, claimStore.PutRoleMappings(context.Background(), "acme", appID, []tenant.RoleMapping{
+		{CognitoGroup: "Admins", MappedValue: "admin"},
+	}))
+
+	req := defaultMakerRequest(t)
+	require.NoError(t, NewAssertionMaker(appStore, claimStore).MakeAssertion(req, richSession()))
+
+	require.Len(t, req.Assertion.AttributeStatements, 1)
+	attrs := req.Assertion.AttributeStatements[0].Attributes
+	require.Len(t, attrs, 1, "exactly the one mapped attribute is released")
+	assert.Equal(t, "https://app.example.com/email", attrs[0].Name)
+	require.Len(t, attrs[0].Values, 1)
+	assert.Equal(t, "user@example.com", attrs[0].Values[0].Value)
+
+	for _, name := range crewjamDefaultAttributeNames {
+		assert.Nil(t, findAttribute(req.Assertion, name), "crewjam default %s must not be released", name)
+	}
+	for _, name := range []string{"department", "cost_center", "custom:department", "groups", "cognito:groups", "admin"} {
+		assert.Nil(t, findAttribute(req.Assertion, name), "unmapped %s must not be released", name)
+	}
+	// Nothing anywhere in the statement mentions the unmapped values.
+	for _, a := range attrs {
+		for _, v := range a.Values {
+			assert.NotEqual(t, "Engineering", v.Value)
+			assert.NotEqual(t, "CC-42", v.Value)
+			assert.NotEqual(t, "Admins", v.Value)
+			assert.NotEqual(t, "Jane", v.Value)
+			assert.NotEqual(t, "Doe", v.Value)
+		}
+	}
+	// Subject and AuthnStatement from the default maker are kept.
+	require.NotNil(t, req.Assertion.Subject)
+	require.NotNil(t, req.Assertion.Subject.NameID)
+	assert.Equal(t, "user@example.com", req.Assertion.Subject.NameID.Value)
+	assert.NotEmpty(t, req.Assertion.AuthnStatements)
+}
+
+// TestAssertionMaker_NoMappings_NoAttributeStatement: an app with no mappings
+// gets a Subject-only assertion — no AttributeStatement element at all, even
+// though the default maker produced one.
+func TestAssertionMaker_NoMappings_NoAttributeStatement(t *testing.T) {
+	appStore, claimStore, _ := newAssertionTestFixture(t)
+
+	req := defaultMakerRequest(t)
+	require.NoError(t, NewAssertionMaker(appStore, claimStore).MakeAssertion(req, richSession()))
+
+	assert.Empty(t, req.Assertion.AttributeStatements)
+	require.NotNil(t, req.Assertion.Subject)
+	assert.Equal(t, "user@example.com", req.Assertion.Subject.NameID.Value)
+}
+
+// TestAssertionMaker_PrepopulatedStatementIsReplaced: a caller-supplied
+// assertion that already carries attributes does not get them appended to —
+// the statement is rebuilt from the mappings alone.
+func TestAssertionMaker_PrepopulatedStatementIsReplaced(t *testing.T) {
+	appStore, claimStore, appID := newAssertionTestFixture(t)
+	require.NoError(t, claimStore.PutClaimMappings(context.Background(), "acme", appID, []tenant.ClaimMapping{
+		{Name: "sub", SourceType: "cognito", SourceAttribute: "sub", TargetAttribute: "https://app.example.com/id"},
+	}))
+
+	req := &saml.IdpAuthnRequest{
+		HTTPRequest:             httpRequestForTenant("acme"),
+		ServiceProviderMetadata: &saml.EntityDescriptor{EntityID: "https://sp.example.com/saml"},
+		Assertion: &saml.Assertion{
+			AttributeStatements: []saml.AttributeStatement{{Attributes: []saml.Attribute{
+				{Name: "urn:oid:1.3.6.1.4.1.5923.1.1.1.1", Values: []saml.AttributeValue{{Value: "member"}}},
+			}}},
+		},
+		Now: time.Now(),
+	}
+	require.NoError(t, NewAssertionMaker(appStore, claimStore).MakeAssertion(req, richSession()))
+
+	require.Len(t, req.Assertion.AttributeStatements, 1)
+	require.Len(t, req.Assertion.AttributeStatements[0].Attributes, 1)
+	assert.Equal(t, "https://app.example.com/id", req.Assertion.AttributeStatements[0].Attributes[0].Name)
+	assert.Nil(t, findAttribute(req.Assertion, "urn:oid:1.3.6.1.4.1.5923.1.1.1.1"))
+}
+
+// TestAssertionMaker_AttributeSourceTypeAlias: the registration wizard stores
+// SourceType "attribute"; it must resolve exactly like "cognito".
+func TestAssertionMaker_AttributeSourceTypeAlias(t *testing.T) {
+	appStore, claimStore, appID := newAssertionTestFixture(t)
+	require.NoError(t, claimStore.PutClaimMappings(context.Background(), "acme", appID, []tenant.ClaimMapping{
+		{Name: "mail", SourceType: "attribute", SourceAttribute: "email", TargetAttribute: "urn:oid:0.9.2342.19200300.100.1.3"},
+		{Name: "dept", SourceType: "attribute", SourceAttribute: "department", TargetAttribute: "https://app.example.com/department"},
+	}))
+
+	req := defaultMakerRequest(t)
+	require.NoError(t, NewAssertionMaker(appStore, claimStore).MakeAssertion(req, richSession()))
+
+	mail := findAttribute(req.Assertion, "urn:oid:0.9.2342.19200300.100.1.3")
+	require.NotNil(t, mail, "wizard 'attribute' mapping must resolve")
+	require.Len(t, mail.Values, 1)
+	assert.Equal(t, "user@example.com", mail.Values[0].Value)
+
+	dept := findAttribute(req.Assertion, "https://app.example.com/department")
+	require.NotNil(t, dept)
+	assert.Equal(t, "Engineering", dept.Values[0].Value)
+
+	// Still only the two mapped attributes.
+	require.Len(t, req.Assertion.AttributeStatements, 1)
+	assert.Len(t, req.Assertion.AttributeStatements[0].Attributes, 2)
+	assert.Nil(t, findAttribute(req.Assertion, "cost_center"))
+}
+
+// TestAssertionMaker_NoTenantOnRequest_NoAttributeStatement: without a tenant
+// the app cannot be resolved safely, so nothing is released (and the default
+// maker's statement is not kept either).
+func TestAssertionMaker_NoTenantOnRequest_NoAttributeStatement(t *testing.T) {
+	appStore, claimStore, appID := newAssertionTestFixture(t)
+	require.NoError(t, claimStore.PutClaimMappings(context.Background(), "acme", appID, []tenant.ClaimMapping{
+		{Name: "email", SourceType: "cognito", SourceAttribute: "email", TargetAttribute: "https://app.example.com/email"},
+	}))
+
+	req := defaultMakerRequest(t)
+	req.HTTPRequest = httptest.NewRequest(http.MethodPost, "/saml/sso", nil) // no chi tenant param
+	require.NoError(t, NewAssertionMaker(appStore, claimStore).MakeAssertion(req, richSession()))
+	assert.Empty(t, req.Assertion.AttributeStatements)
+}
+
+func mustURL(t *testing.T, raw string) url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	require.NoError(t, err)
+	return *u
 }
 
 func TestResolveSessionField_AllBranches(t *testing.T) {

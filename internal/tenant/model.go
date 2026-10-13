@@ -249,6 +249,19 @@ type SAMLConfig struct {
 	AllowInsecureSHA1 bool `dynamo:"allowInsecureSha1,omitempty" json:"allowInsecureSha1,omitempty"`
 }
 
+// IsCognitoSource reports whether a ClaimMapping.SourceType selects a value
+// from the user's Cognito claims. "cognito" is the canonical value; "attribute"
+// is the alias the registration wizard writes (see api.toClaimMappings) and
+// must resolve identically, otherwise wizard-created mappings silently release
+// nothing. Both the SAML assertion maker and the mapping preview use this.
+func IsCognitoSource(sourceType string) bool {
+	switch sourceType {
+	case "cognito", "attribute":
+		return true
+	}
+	return false
+}
+
 // ClaimMapping defines how to transform Cognito JWT claims to SAML attributes.
 type ClaimMapping struct {
 	Name            string `dynamo:"name" json:"name"`

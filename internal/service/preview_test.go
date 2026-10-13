@@ -234,6 +234,54 @@ func TestPreviewService_Preview_DefaultValues(t *testing.T) {
 	}
 }
 
+// TestPreviewService_Preview_AttributeSourceTypeAlias: the registration wizard
+// stores SourceType "attribute" (api.toClaimMappings); the preview must resolve
+// it exactly like "cognito" for both protocols, matching the assertion maker.
+func TestPreviewService_Preview_AttributeSourceTypeAlias(t *testing.T) {
+	claimRepo := &mockClaimRepository{
+		claimMappings: []tenant.ClaimMapping{
+			{TargetAttribute: "mail", SourceType: "attribute", SourceAttribute: "email"},
+			{TargetAttribute: "uid", SourceType: "attribute", SourceAttribute: "sub"},
+		},
+	}
+	testUser := TestUserClaims{Sub: "user_alias", Email: "alias@example.com"}
+
+	t.Run("saml", func(t *testing.T) {
+		svc := NewPreviewService(&mockAppReader{app: &tenant.Application{ID: "app_a", Protocol: "saml"}}, claimRepo)
+		result, err := svc.Preview(context.Background(), "tenant1", "app_a", testUser)
+		if err != nil {
+			t.Fatalf("Preview failed: %v", err)
+		}
+		if !strings.Contains(result.Preview, `<saml:Attribute Name="mail">`) ||
+			!strings.Contains(result.Preview, `<saml:AttributeValue>alias@example.com</saml:AttributeValue>`) {
+			t.Errorf("SAML preview should resolve 'attribute' source type like 'cognito', got:\n%s", result.Preview)
+		}
+		if !strings.Contains(result.Preview, `<saml:AttributeValue>user_alias</saml:AttributeValue>`) {
+			t.Errorf("SAML preview should contain sub value, got:\n%s", result.Preview)
+		}
+	})
+
+	t.Run("oidc", func(t *testing.T) {
+		svc := NewPreviewService(&mockAppReader{app: &tenant.Application{ID: "app_b", Protocol: "oidc"}}, claimRepo)
+		result, err := svc.Preview(context.Background(), "tenant1", "app_b", testUser)
+		if err != nil {
+			t.Fatalf("Preview failed: %v", err)
+		}
+		if !strings.Contains(result.Preview, `"mail": "alias@example.com"`) ||
+			!strings.Contains(result.Preview, `"uid": "user_alias"`) {
+			t.Errorf("OIDC preview should resolve 'attribute' source type like 'cognito', got:\n%s", result.Preview)
+		}
+	})
+}
+
+func TestIsCognitoSource(t *testing.T) {
+	for st, want := range map[string]bool{"cognito": true, "attribute": true, "static": false, "groupMapping": false, "": false} {
+		if got := tenant.IsCognitoSource(st); got != want {
+			t.Errorf("IsCognitoSource(%q) = %v, want %v", st, got, want)
+		}
+	}
+}
+
 func TestPreviewService_Preview_XMLEscaping(t *testing.T) {
 	appReader := &mockAppReader{
 		app: &tenant.Application{
