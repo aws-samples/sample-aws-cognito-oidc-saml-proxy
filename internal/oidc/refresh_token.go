@@ -3,6 +3,8 @@ package oidc
 import (
 	"fmt"
 	"time"
+
+	"github.com/zitadel/oidc/v3/pkg/op"
 )
 
 // defaultRefreshTokenLifetime is used when the client's OIDCConfig does not
@@ -19,7 +21,7 @@ func oidcRefreshTokenSK() string             { return "META" }
 // It stores everything needed to reconstruct the original authorization
 // context (a RefreshTokenRequest) plus the Cognito claims required to keep the
 // re-issued ID token / userinfo response populated across refreshes — the
-// in-memory userClaims cache is not shared across Lambda invocations.
+// refresh grant runs on the oidc-token Lambda, which never saw the login.
 type refreshTokenItem struct {
 	PK        string    `dynamo:"PK,hash" json:"-"`
 	SK        string    `dynamo:"SK,range" json:"-"`
@@ -34,11 +36,25 @@ type refreshTokenItem struct {
 	ExpiresAt time.Time `dynamo:"expiresAt" json:"expiresAt"`
 
 	// Cognito claims carried alongside the token so they survive refresh.
-	Email         string   `dynamo:"email" json:"email,omitempty"`
-	GivenName     string   `dynamo:"givenName" json:"givenName,omitempty"`
-	FamilyName    string   `dynamo:"familyName" json:"familyName,omitempty"`
-	EmailVerified bool     `dynamo:"emailVerified" json:"emailVerified,omitempty"`
-	Groups        []string `dynamo:"groups" json:"groups,omitempty"`
+	Email            string            `dynamo:"email" json:"email,omitempty"`
+	GivenName        string            `dynamo:"givenName" json:"givenName,omitempty"`
+	FamilyName       string            `dynamo:"familyName" json:"familyName,omitempty"`
+	EmailVerified    bool              `dynamo:"emailVerified" json:"emailVerified,omitempty"`
+	Groups           []string          `dynamo:"groups" json:"groups,omitempty"`
+	CustomAttributes map[string]string `dynamo:"customAttributes,omitempty" json:"customAttributes,omitempty"`
+}
+
+// claims rebuilds the SubjectClaims persisted on the refresh-token record.
+func (i *refreshTokenItem) claims() SubjectClaims {
+	return SubjectClaims{
+		Sub:              i.Subject,
+		Email:            i.Email,
+		EmailVerified:    i.EmailVerified,
+		GivenName:        i.GivenName,
+		FamilyName:       i.FamilyName,
+		Groups:           i.Groups,
+		CustomAttributes: i.CustomAttributes,
+	}
 }
 
 // refreshTokenRequest implements op.RefreshTokenRequest (and, by extension, the
@@ -54,7 +70,7 @@ type refreshTokenRequest struct {
 
 	// claims are carried forward so a rotated refresh token keeps the same
 	// Cognito claims without another Cognito round-trip.
-	claims userClaims
+	claims SubjectClaims
 }
 
 func (r *refreshTokenRequest) GetAMR() []string            { return r.amr }
@@ -78,22 +94,26 @@ type refreshableRequest interface {
 	GetAuthTime() time.Time
 }
 
-// claimsFromRequest extracts the Cognito claims to persist with a refresh
-// token, handling both the initial (*AuthRequest) and rotation
-// (*refreshTokenRequest) cases.
-func claimsFromRequest(req refreshableRequest) userClaims {
+// claimsFromRequest extracts the persisted Cognito claims from a token request:
+// the *AuthRequest loaded by code on the initial exchange or the
+// *refreshTokenRequest rebuilt from the refresh-token record on rotation. Any
+// other request type carries no claims and yields the zero value (subject
+// only) — never a synthesised email.
+func claimsFromRequest(req op.TokenRequest) SubjectClaims {
 	switch r := req.(type) {
 	case *AuthRequest:
-		return userClaims{
-			Email:         r.CognitoEmail,
-			GivenName:     r.CognitoGivenName,
-			FamilyName:    r.CognitoFamilyName,
-			EmailVerified: r.CognitoEmailVerified,
-			Groups:        r.CognitoGroups,
+		return SubjectClaims{
+			Sub:              r.UserID,
+			Email:            r.CognitoEmail,
+			EmailVerified:    r.CognitoEmailVerified,
+			GivenName:        r.CognitoGivenName,
+			FamilyName:       r.CognitoFamilyName,
+			Groups:           r.CognitoGroups,
+			CustomAttributes: r.CognitoCustomAttributes,
 		}
 	case *refreshTokenRequest:
 		return r.claims
 	default:
-		return userClaims{}
+		return SubjectClaims{Sub: req.GetSubject()}
 	}
 }

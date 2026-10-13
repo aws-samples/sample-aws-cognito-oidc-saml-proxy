@@ -442,7 +442,7 @@ func (h *LoginHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	claims := cognito.ExtractClaims(payload)
 
 	// Complete the auth request in storage with full Cognito claims.
-	if err := h.storage.CompleteAuthRequest(ctx, flowState.AuthRequestID, claims.Sub, claims.Email, claims.GivenName, claims.FamilyName, claims.EmailVerified, claims.Groups); err != nil {
+	if err := h.storage.CompleteAuthRequest(ctx, flowState.AuthRequestID, SubjectClaimsFromCognito(claims)); err != nil {
 		slog.Error("failed to complete auth request", "error", err,
 			"authRequestID", flowState.AuthRequestID)
 		http.Error(w, "failed to complete auth request", http.StatusInternalServerError)
@@ -642,7 +642,7 @@ func (h *LoginHandler) HandleLoginComplete(w http.ResponseWriter, r *http.Reques
 	}
 
 	claims := cognito.ExtractClaims(payload)
-	if err := h.storage.CompleteAuthRequest(ctx, pl.AuthRequestID, claims.Sub, claims.Email, claims.GivenName, claims.FamilyName, claims.EmailVerified, claims.Groups); err != nil {
+	if err := h.storage.CompleteAuthRequest(ctx, pl.AuthRequestID, SubjectClaimsFromCognito(claims)); err != nil {
 		slog.Error("custom login: failed to complete auth request", "error", err, "authRequestID", pl.AuthRequestID)
 		http.Error(w, "failed to complete auth request", http.StatusInternalServerError)
 		return

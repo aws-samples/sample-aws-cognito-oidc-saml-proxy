@@ -628,20 +628,37 @@ func TestCompleteAuthRequest(t *testing.T) {
 	assert.False(t, authReq.Done(), "new auth request should not be done")
 
 	// Complete the request with Cognito claims. email_verified=true here.
-	err = s.CompleteAuthRequest(ctx, authReq.GetID(), "user-sub-123", "user@example.com", "Test", "User", true, []string{"admins", "users"})
+	err = s.CompleteAuthRequest(ctx, authReq.GetID(), SubjectClaims{
+		Sub:              "user-sub-123",
+		Email:            "user@example.com",
+		EmailVerified:    true,
+		GivenName:        "Test",
+		FamilyName:       "User",
+		Groups:           []string{"admins", "users"},
+		CustomAttributes: map[string]string{"department": "eng"},
+	})
 	require.NoError(t, err)
 
-	// Verify it is now done.
+	// Verify it is now done and that every claim was persisted on the record.
 	completed, err := s.AuthRequestByID(ctx, authReq.GetID())
 	require.NoError(t, err)
 	assert.True(t, completed.Done(), "completed auth request should be done")
 	assert.Equal(t, "user-sub-123", completed.GetSubject())
 	assert.False(t, completed.GetAuthTime().IsZero(), "auth time should be set")
 
+	ar := completed.(*AuthRequest)
+	assert.Equal(t, "user@example.com", ar.CognitoEmail)
+	assert.True(t, ar.CognitoEmailVerified)
+	assert.Equal(t, "Test", ar.CognitoGivenName)
+	assert.Equal(t, "User", ar.CognitoFamilyName)
+	assert.Equal(t, []string{"admins", "users"}, ar.CognitoGroups)
+	assert.Equal(t, map[string]string{"department": "eng"}, ar.CognitoCustomAttributes)
+
 	// email_verified must reflect the real Cognito claim that was passed
 	// in, not an unconditional true.
 	verifiedInfo := new(oidc.UserInfo)
-	require.NoError(t, s.SetUserinfoFromScopes(ctx, verifiedInfo, "user-sub-123", "test-client", []string{"email"}))
+	require.NoError(t, s.SetUserinfoFromRequest(ctx, verifiedInfo, ar, []string{"email"}))
+	assert.Equal(t, "user@example.com", verifiedInfo.Email)
 	assert.True(t, bool(verifiedInfo.EmailVerified), "email_verified must carry through when the Cognito claim is true")
 }
 
@@ -662,10 +679,14 @@ func TestCompleteAuthRequest_EmailVerifiedFalse(t *testing.T) {
 	require.NoError(t, err)
 
 	// Cognito asserted email_verified=false for this login.
-	require.NoError(t, s.CompleteAuthRequest(ctx, authReq.GetID(), "unverified-sub", "unverified@example.com", "No", "Verify", false, nil))
+	require.NoError(t, s.CompleteAuthRequest(ctx, authReq.GetID(), SubjectClaims{
+		Sub: "unverified-sub", Email: "unverified@example.com", GivenName: "No", FamilyName: "Verify",
+	}))
+	completed, err := s.AuthRequestByID(ctx, authReq.GetID())
+	require.NoError(t, err)
 
 	info := new(oidc.UserInfo)
-	require.NoError(t, s.SetUserinfoFromScopes(ctx, info, "unverified-sub", "test-client", []string{"email"}))
+	require.NoError(t, s.SetUserinfoFromRequest(ctx, info, completed.(*AuthRequest), []string{"email"}))
 	assert.Equal(t, "unverified@example.com", info.Email)
 	assert.False(t, bool(info.EmailVerified), "unverified Cognito email must not be advertised as verified")
 }
@@ -674,8 +695,31 @@ func TestCompleteAuthRequest_NotFound(t *testing.T) {
 	s, _, _, _ := newTestStorage(t)
 	ctx := context.Background()
 
-	err := s.CompleteAuthRequest(ctx, "nonexistent-id", "user-sub-123", "user@example.com", "Test", "User", true, []string{})
+	err := s.CompleteAuthRequest(ctx, "nonexistent-id", SubjectClaims{Sub: "user-sub-123", Email: "user@example.com"})
 	assert.Error(t, err, "completing a nonexistent auth request should fail")
+}
+
+func TestSubjectClaimsFromCognito(t *testing.T) {
+	assert.Equal(t, SubjectClaims{}, SubjectClaimsFromCognito(nil))
+
+	got := SubjectClaimsFromCognito(&cognito.UserClaims{
+		Sub:              "sub-1",
+		Email:            "a@example.com",
+		EmailVerified:    true,
+		GivenName:        "A",
+		FamilyName:       "B",
+		Groups:           []string{"g1"},
+		CustomAttributes: map[string]string{"department": "eng"},
+	})
+	assert.Equal(t, SubjectClaims{
+		Sub:              "sub-1",
+		Email:            "a@example.com",
+		EmailVerified:    true,
+		GivenName:        "A",
+		FamilyName:       "B",
+		Groups:           []string{"g1"},
+		CustomAttributes: map[string]string{"department": "eng"},
+	}, got)
 }
 
 func TestTenantSlugFromIssuer(t *testing.T) {

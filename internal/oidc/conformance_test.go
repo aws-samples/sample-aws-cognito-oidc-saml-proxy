@@ -7,11 +7,13 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -409,6 +411,131 @@ func TestOIDC_TokenEndpoint(t *testing.T) {
 				"%s - Expected 4xx error, got status %d", tt.description, resp.StatusCode)
 		})
 	}
+
+	// A valid authorization_code grant (PKCE, public client) through the real
+	// zitadel/oidc endpoint must mint an ID token that carries the claims
+	// persisted at login — not a subject masquerading as the email (M-2).
+	t.Run("code grant ID token carries stored claims", func(t *testing.T) {
+		grant := exchangeCodeGrant(t)
+		idClaims := decodeJWTClaims(t, grant.IDToken)
+		assert.Equal(t, "cognito-sub-ada", idClaims["sub"])
+		assert.Equal(t, "ada@example.com", idClaims["email"], "email must be the real address, not the sub")
+		assert.Equal(t, true, idClaims["email_verified"])
+		assert.Equal(t, "Ada", idClaims["given_name"])
+		assert.Equal(t, "Lovelace", idClaims["family_name"])
+		assert.Equal(t, "Ada Lovelace", idClaims["name"])
+		assert.Equal(t, []any{"engineers", "reviewers"}, idClaims["groups"])
+		// The per-app claim mapping is applied to the ID token too.
+		assert.Equal(t, "maths", idClaims["department"])
+	})
+}
+
+// codeGrantResult is what exchangeCodeGrant hands back: the token response plus
+// the server and tenant the tokens were minted on.
+type codeGrantResult struct {
+	Server      *httptest.Server
+	TenantSlug  string
+	AccessToken string
+	IDToken     string
+}
+
+// exchangeCodeGrant runs a full authorization_code grant against a fresh test
+// server: it registers a public PKCE client with a `department` claim mapping,
+// completes an auth request (as the oidc-authorize Lambda would after Cognito
+// returns) with a rich claim set, saves a code, and exchanges it at the real
+// token endpoint with the matching code_verifier.
+func exchangeCodeGrant(t *testing.T) codeGrantResult {
+	t.Helper()
+	server, appStore, sourceStore, storage, claimStore := setupRefreshTestServer(t)
+	tenantSlug := "test-tenant"
+	clientID := createRefreshCapableApp(t, appStore, sourceStore, tenantSlug)
+	ctx := context.Background()
+
+	// A per-app claim mapping: the custom `department` attribute is released
+	// under the same name in the ID token and userinfo.
+	require.NoError(t, claimStore.PutClaimMappings(ctx, tenantSlug, clientID, []tenant.ClaimMapping{
+		{Name: "dept", SourceType: "attribute", SourceAttribute: "department", TargetAttribute: "department"},
+	}))
+
+	// RFC 7636 Appendix B test vector.
+	const (
+		codeVerifier  = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+		codeChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+		code          = "conformance-code-grant"
+	)
+	created, err := storage.CreateAuthRequest(ctx, &zoidc.AuthRequest{
+		ClientID:            clientID,
+		RedirectURI:         "https://app.example.com/callback",
+		Scopes:              zoidc.SpaceDelimitedArray{"openid", "email", "profile", "offline_access"},
+		ResponseType:        zoidc.ResponseTypeCode,
+		Nonce:               "n-0S6_WzA2Mj",
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: zoidc.CodeChallengeMethodS256,
+	}, "")
+	require.NoError(t, err)
+	require.NoError(t, storage.CompleteAuthRequest(ctx, created.GetID(), oidc.SubjectClaims{
+		Sub:              "cognito-sub-ada",
+		Email:            "ada@example.com",
+		EmailVerified:    true,
+		GivenName:        "Ada",
+		FamilyName:       "Lovelace",
+		Groups:           []string{"engineers", "reviewers"},
+		CustomAttributes: map[string]string{"department": "maths"},
+	}))
+	require.NoError(t, storage.SaveAuthCode(ctx, created.GetID(), code))
+
+	resp, err := http.PostForm(server.URL+"/t/"+tenantSlug+"/oidc/oauth/token", url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {"https://app.example.com/callback"},
+		"client_id":     {clientID},
+		"code_verifier": {codeVerifier},
+	})
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "code grant should succeed: %s", string(body))
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		IDToken     string `json:"id_token"`
+	}
+	require.NoError(t, json.Unmarshal(body, &tokenResp))
+	require.NotEmpty(t, tokenResp.AccessToken)
+	require.NotEmpty(t, tokenResp.IDToken)
+
+	return codeGrantResult{Server: server, TenantSlug: tenantSlug, AccessToken: tokenResp.AccessToken, IDToken: tokenResp.IDToken}
+}
+
+// decodeJWTClaims returns the (unverified) payload claims of a compact JWS.
+// Signature verification is covered by the JWKS tests; here only the claim
+// content matters.
+func decodeJWTClaims(t *testing.T, token string) map[string]any {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3, "expected a compact JWS")
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return claims
+}
+
+// fetchUserinfo calls the userinfo endpoint with a Bearer token and returns the
+// decoded JSON body, requiring a 200.
+func fetchUserinfo(t *testing.T, userinfoURL, accessToken string) map[string]any {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, userinfoURL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "userinfo should succeed: %s", string(body))
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(body, &claims))
+	return claims
 }
 
 // TestOIDC_SuspendedTenantRejected is the M-5 regression for the OIDC mount:
@@ -467,12 +594,28 @@ func TestOIDC_UserInfoEndpoint(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "Request without Bearer token should return 401")
+
+	// With a Bearer token from a real code grant, userinfo must serve the
+	// claims persisted on the access-token record (M-2): the real address,
+	// its verified flag, the names, the groups and the per-app mapping.
+	t.Run("bearer token serves stored claims", func(t *testing.T) {
+		grant := exchangeCodeGrant(t)
+		claims := fetchUserinfo(t, grant.Server.URL+"/t/"+grant.TenantSlug+"/oidc/userinfo", grant.AccessToken)
+		assert.Equal(t, "cognito-sub-ada", claims["sub"])
+		assert.Equal(t, "ada@example.com", claims["email"], "email must be the real address, not the sub")
+		assert.Equal(t, true, claims["email_verified"])
+		assert.Equal(t, "Ada", claims["given_name"])
+		assert.Equal(t, "Lovelace", claims["family_name"])
+		assert.Equal(t, "ada@example.com", claims["preferred_username"])
+		assert.Equal(t, []any{"engineers", "reviewers"}, claims["groups"])
+		assert.Equal(t, "maths", claims["department"])
+	})
 }
 
 // setupRefreshTestServer mirrors setupTestServer but also returns the shared
 // Storage so a test can mint tokens directly (bypassing the interactive Cognito
 // login) before exercising the token endpoint.
-func setupRefreshTestServer(t *testing.T) (*httptest.Server, *store.AppStore, *store.SourceStore, *oidc.Storage) {
+func setupRefreshTestServer(t *testing.T) (*httptest.Server, *store.AppStore, *store.SourceStore, *oidc.Storage, *store.ClaimStore) {
 	t.Helper()
 
 	configDB := store.NewMemoryDB()
@@ -502,7 +645,7 @@ func setupRefreshTestServer(t *testing.T) (*httptest.Server, *store.AppStore, *s
 	server := httptest.NewServer(r)
 	t.Cleanup(server.Close)
 
-	return server, appStore, sourceStore, storage
+	return server, appStore, sourceStore, storage, claimStore
 }
 
 // createRefreshCapableApp registers an OIDC app that holds the refresh_token
@@ -550,7 +693,7 @@ func createRefreshCapableApp(t *testing.T, appStore *store.AppStore, sourceStore
 // exchange the refresh token for a new pair, and confirm the old refresh token
 // is rejected (single-use rotation).
 func TestOIDC_RefreshTokenGrant(t *testing.T) {
-	server, appStore, sourceStore, storage := setupRefreshTestServer(t)
+	server, appStore, sourceStore, storage, _ := setupRefreshTestServer(t)
 	tenantSlug := "test-tenant"
 	clientID := createRefreshCapableApp(t, appStore, sourceStore, tenantSlug)
 
@@ -567,8 +710,10 @@ func TestOIDC_RefreshTokenGrant(t *testing.T) {
 	}
 	created, err := storage.CreateAuthRequest(ctx, authReqIn, "")
 	require.NoError(t, err)
-	require.NoError(t, storage.CompleteAuthRequest(ctx, created.GetID(), "user@example.com",
-		"user@example.com", "Ada", "Lovelace", true, []string{"engineers"}))
+	require.NoError(t, storage.CompleteAuthRequest(ctx, created.GetID(), oidc.SubjectClaims{
+		Sub: "user@example.com", Email: "user@example.com", EmailVerified: true,
+		GivenName: "Ada", FamilyName: "Lovelace", Groups: []string{"engineers"},
+	}))
 	completed, err := storage.AuthRequestByID(ctx, created.GetID())
 	require.NoError(t, err)
 
@@ -615,6 +760,20 @@ func TestOIDC_RefreshTokenGrant(t *testing.T) {
 	assert.NotEmpty(t, tokenResp.RefreshToken, "must return a rotated refresh token")
 	assert.NotEqual(t, refreshToken, tokenResp.RefreshToken, "refresh token must rotate")
 
+	// M-2: the re-issued ID token carries the claims persisted on the refresh
+	// token record — the real address, its verified flag and the groups.
+	idClaims := decodeJWTClaims(t, tokenResp.IDToken)
+	assert.Equal(t, "user@example.com", idClaims["email"])
+	assert.Equal(t, true, idClaims["email_verified"])
+	assert.Equal(t, "Ada", idClaims["given_name"])
+	assert.Equal(t, []any{"engineers"}, idClaims["groups"])
+
+	// And userinfo for the new access token reads the same claims.
+	uiClaims := fetchUserinfo(t, server.URL+"/t/"+tenantSlug+"/oidc/userinfo", tokenResp.AccessToken)
+	assert.Equal(t, "user@example.com", uiClaims["email"])
+	assert.Equal(t, true, uiClaims["email_verified"])
+	assert.Equal(t, []any{"engineers"}, uiClaims["groups"])
+
 	// The old refresh token must now be rejected (single-use rotation).
 	resp2, err := http.PostForm(tokenURL, url.Values{
 		"grant_type":    {"refresh_token"},
@@ -641,7 +800,7 @@ func TestOIDC_RefreshTokenGrant(t *testing.T) {
 // valid refresh token must be refused with a proper OAuth error (invalid_client,
 // since the client lookup itself fails closed) — never a new token pair.
 func TestOIDC_RefreshTokenGrant_DisabledApp(t *testing.T) {
-	server, appStore, sourceStore, storage := setupRefreshTestServer(t)
+	server, appStore, sourceStore, storage, _ := setupRefreshTestServer(t)
 	tenantSlug := "test-tenant"
 	clientID := createRefreshCapableApp(t, appStore, sourceStore, tenantSlug)
 	ctx := context.Background()
@@ -653,8 +812,9 @@ func TestOIDC_RefreshTokenGrant_DisabledApp(t *testing.T) {
 		ResponseType: zoidc.ResponseTypeCode,
 	}, "")
 	require.NoError(t, err)
-	require.NoError(t, storage.CompleteAuthRequest(ctx, created.GetID(), "user@example.com",
-		"user@example.com", "Ada", "Lovelace", true, nil))
+	require.NoError(t, storage.CompleteAuthRequest(ctx, created.GetID(), oidc.SubjectClaims{
+		Sub: "user@example.com", Email: "user@example.com", EmailVerified: true, GivenName: "Ada", FamilyName: "Lovelace",
+	}))
 	completed, err := storage.AuthRequestByID(ctx, created.GetID())
 	require.NoError(t, err)
 	_, refreshToken, _, err := storage.CreateAccessAndRefreshTokens(ctx, completed, "")

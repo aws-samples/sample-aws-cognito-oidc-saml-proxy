@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
@@ -162,52 +163,38 @@ func TestSetUserinfoFromToken(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "user@example.com", userinfo.Subject)
-	assert.Equal(t, "user@example.com", string(userinfo.Email))
+	// The request carried no Cognito email, so none is emitted — the subject
+	// (which happens to look like an address here) is never substituted.
+	assert.Empty(t, userinfo.Email)
+	assert.False(t, bool(userinfo.EmailVerified))
 }
 
+// TestGetPrivateClaimsFromScopes: the deprecated scope-based hook has no record
+// to read from and contributes nothing; GetPrivateClaimsFromRequest (covered by
+// TestClaimMappings_*) is the request-aware replacement zitadel prefers.
 func TestGetPrivateClaimsFromScopes(t *testing.T) {
 	s, _, _, _ := newTestStorage(t)
 	ctx := context.Background()
 
-	t.Run("without cached claims", func(t *testing.T) {
-		claims, err := s.GetPrivateClaimsFromScopes(ctx, "user-1", "client-1", []string{"openid"})
-		require.NoError(t, err)
-		assert.Nil(t, claims)
-	})
+	claims, err := s.GetPrivateClaimsFromScopes(ctx, "user-1", "client-1", []string{"openid"})
+	require.NoError(t, err)
+	assert.Nil(t, claims)
+}
 
-	t.Run("with cached groups", func(t *testing.T) {
-		// Store user claims with groups. The lookup derives the tenant from the
-		// issuer; a background ctx yields the empty tenant, so key on it here.
-		s.userClaims.Store(claimsKey("", "user-with-groups"), &userClaims{
-			Email:      "bob@example.com",
-			GivenName:  "Bob",
-			FamilyName: "Jones",
-			Groups:     []string{"developers", "reviewers"},
-		})
+// TestGetPrivateClaimsFromRequest_RefreshRequest: groups ride on the refresh
+// token record and come back as private claims on the refresh grant.
+func TestGetPrivateClaimsFromRequest_RefreshRequest(t *testing.T) {
+	s, appStore, _, _ := newTestStorage(t)
+	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-		claims, err := s.GetPrivateClaimsFromScopes(ctx, "user-with-groups", "client-1", []string{"openid"})
-		require.NoError(t, err)
-		require.NotNil(t, claims)
+	_, refreshToken := issueRefreshToken(t, s, clientID)
+	rr, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
+	require.NoError(t, err)
 
-		// Verify groups are included as a private claim.
-		groups, ok := claims["groups"].([]string)
-		require.True(t, ok, "groups claim should be a []string")
-		assert.Equal(t, []string{"developers", "reviewers"}, groups)
-	})
-
-	t.Run("without groups", func(t *testing.T) {
-		// Store user claims without groups (empty tenant to match the ctx issuer).
-		s.userClaims.Store(claimsKey("", "user-no-groups"), &userClaims{
-			Email:      "carol@example.com",
-			GivenName:  "Carol",
-			FamilyName: "White",
-			Groups:     []string{},
-		})
-
-		claims, err := s.GetPrivateClaimsFromScopes(ctx, "user-no-groups", "client-1", []string{"openid"})
-		require.NoError(t, err)
-		assert.Nil(t, claims, "should return nil when no private claims are present")
-	})
+	claims, err := s.GetPrivateClaimsFromRequest(ctx, rr, []string{"openid"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"engineers"}, claims["groups"])
 }
 
 func TestGetKeyByIDAndClientID(t *testing.T) {
@@ -275,46 +262,53 @@ func TestAuthorizeClientIDSecret_ClientNotFound(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// TestClaimsCacheTenantIsolation verifies that claims cached during one
-// tenant's login must not be served on another tenant's issuer path, even when
-// the Cognito subject value collides across pools.
-func TestClaimsCacheTenantIsolation(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
-
-	const sub = "cognito-sub-collision"
-	// Simulate tenant-a completing a login for `sub`.
-	s.userClaims.Store(claimsKey("tenant-a", sub), &userClaims{
-		Email:         "alice@tenant-a.example.com",
-		EmailVerified: true,
-		Groups:        []string{"tenant-a-admins"},
-	})
-
+// TestClaimsTenantIsolation verifies that a token minted under tenant A carries
+// A's claims and only A's claims, and that tenant B's issuer cannot resolve the
+// client at all — so a colliding Cognito subject across pools can never be
+// served another tenant's claims. Claims are bound to the token record (not to
+// a (tenant, sub) key), so there is no shared lookup for tenant B to hit.
+func TestClaimsTenantIsolation(t *testing.T) {
+	s, appStore, claimStore, _ := newTestStorage(t)
 	ctxA := op.ContextWithIssuer(context.Background(), "https://idp.example.com/t/tenant-a/oidc")
 	ctxB := op.ContextWithIssuer(context.Background(), "https://idp.example.com/t/tenant-b/oidc")
 
-	// Tenant A sees its own claims.
+	const sub = "cognito-sub-collision"
+	clientA := seedOIDCClient(t, appStore, "tenant-a")
+	clientB := seedOIDCClient(t, appStore, "tenant-b")
+
+	// Tenant B has a mapping for ITS client that would leak if B's config were
+	// ever consulted for A's token.
+	require.NoError(t, claimStore.PutClaimMappings(ctxB, "tenant-b", clientB, []tenant.ClaimMapping{
+		{Name: "b", SourceType: "static", DefaultValue: "tenant-b-secret", TargetAttribute: "b_only"},
+	}))
+
+	// Tenant A completes a login for `sub` and mints a token.
+	created, err := s.CreateAuthRequest(ctxA, &oidc.AuthRequest{
+		ClientID: clientA, RedirectURI: "https://app.example.com/callback",
+		Scopes: oidc.SpaceDelimitedArray{"openid", "email"}, ResponseType: oidc.ResponseTypeCode,
+	}, "")
+	require.NoError(t, err)
+	require.NoError(t, s.CompleteAuthRequest(ctxA, created.GetID(), SubjectClaims{
+		Sub: sub, Email: "alice@tenant-a.example.com", EmailVerified: true, Groups: []string{"tenant-a-admins"},
+	}))
+	loaded, err := s.AuthRequestByID(ctxA, created.GetID())
+	require.NoError(t, err)
+	accessToken, _, err := s.CreateAccessToken(ctxA, loaded)
+	require.NoError(t, err)
+
+	// Tenant A sees its own claims and nothing of tenant B's.
 	uiA := new(oidc.UserInfo)
-	require.NoError(t, s.SetUserinfoFromScopes(ctxA, uiA, sub, "client-a", []string{"openid", "email"}))
-	assert.Equal(t, "alice@tenant-a.example.com", string(uiA.Email))
+	require.NoError(t, s.SetUserinfoFromToken(ctxA, uiA, accessToken, sub, ""))
+	assert.Equal(t, "alice@tenant-a.example.com", uiA.Email)
 	assert.True(t, bool(uiA.EmailVerified))
+	assert.Equal(t, []string{"tenant-a-admins"}, uiA.Claims["groups"])
+	assert.NotContains(t, uiA.Claims, "b_only")
 
-	// Tenant B, with the SAME sub, must NOT read tenant A's claims. The cache
-	// misses, so the email falls back to the raw subject and email_verified is
-	// false — no cross-tenant contamination.
-	uiB := new(oidc.UserInfo)
-	require.NoError(t, s.SetUserinfoFromScopes(ctxB, uiB, sub, "client-b", []string{"openid", "email"}))
-	assert.Equal(t, sub, string(uiB.Email))
-	assert.False(t, bool(uiB.EmailVerified))
-
-	// Private (groups) claims are likewise isolated.
-	groupsA, err := s.GetPrivateClaimsFromScopes(ctxA, sub, "client-a", []string{"openid"})
-	require.NoError(t, err)
-	require.NotNil(t, groupsA)
-	assert.Equal(t, []string{"tenant-a-admins"}, groupsA["groups"])
-
-	groupsB, err := s.GetPrivateClaimsFromScopes(ctxB, sub, "client-b", []string{"openid"})
-	require.NoError(t, err)
-	assert.Nil(t, groupsB, "tenant B must not inherit tenant A's groups")
+	// Tenant B's issuer cannot resolve tenant A's client, so neither a code
+	// exchange nor a refresh under B can reach the claims.
+	_, err = s.GetClientByClientID(ctxB, clientA)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tenant-b")
 }
 
 // putAccessToken stores an access-token record directly with the given client and

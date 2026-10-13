@@ -365,53 +365,319 @@ func TestHealth(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// Compile-time assertions: Storage implements the required op.Storage plus the
+// optional request-aware claim hooks zitadel prefers when present. Without the
+// two optional interfaces zitadel falls back to the (userID, clientID) hooks,
+// which have no record to read claims from (finding M-2).
+var (
+	_ op.Storage                       = (*Storage)(nil)
+	_ op.CanSetUserinfoFromRequest     = (*Storage)(nil)
+	_ op.CanGetPrivateClaimsFromRequest = (*Storage)(nil)
+)
+
 func TestStorageImplementsInterface(t *testing.T) {
 	s, _, _, _ := newTestStorage(t)
 
 	// Verify Storage satisfies op.Storage at compile time.
 	var _ op.Storage = s
+	var _ op.CanSetUserinfoFromRequest = s
+	var _ op.CanGetPrivateClaimsFromRequest = s
 }
 
+// TestSetUserinfoFromScopes: the deprecated (userID, clientID) hook only sets
+// the subject. It has no record to read from, so it must never synthesise an
+// email from the subject or claim the address is verified.
 func TestSetUserinfoFromScopes(t *testing.T) {
 	s, _, _, _ := newTestStorage(t)
 	ctx := context.Background()
 
-	t.Run("without cached claims", func(t *testing.T) {
-		userinfo := new(oidc.UserInfo)
-		err := s.SetUserinfoFromScopes(ctx, userinfo, "user@example.com", "client-1", []string{"openid", "email", "profile"})
-		require.NoError(t, err)
+	userinfo := new(oidc.UserInfo)
+	err := s.SetUserinfoFromScopes(ctx, userinfo, "cognito-user-sub-123", "client-1", []string{"openid", "email", "profile"})
+	require.NoError(t, err)
 
-		assert.Equal(t, "user@example.com", userinfo.Subject)
-		assert.Equal(t, "user@example.com", string(userinfo.Email))
-		assert.Equal(t, "user@example.com", userinfo.PreferredUsername)
-		// With no cached claims the fallback email is synthetic and
-		// unverified, so email_verified must be false, never a hard-coded true.
-		assert.False(t, bool(userinfo.EmailVerified))
-	})
-
-	t.Run("with cached Cognito claims", func(t *testing.T) {
-		// Store Cognito claims in the cache (as would happen during
-		// CompleteAuthRequest), keyed by (tenant, sub). The lookup derives the
-		// tenant from the request issuer, so drive the call with a matching issuer.
-		ctx := op.ContextWithIssuer(context.Background(), "https://idp.example.com/t/tenant-a/oidc")
-		s.userClaims.Store(claimsKey("tenant-a", "cognito-user-sub-123"), &userClaims{
-			Email:         "alice@example.com",
-			GivenName:     "Alice",
-			FamilyName:    "Smith",
-			EmailVerified: true,
-			Groups:        []string{"admins", "users"},
-		})
-
-		userinfo := new(oidc.UserInfo)
-		err := s.SetUserinfoFromScopes(ctx, userinfo, "cognito-user-sub-123", "client-1", []string{"openid", "email", "profile"})
-		require.NoError(t, err)
-
-		// Verify all claims are populated from the cache.
-		assert.Equal(t, "cognito-user-sub-123", userinfo.Subject)
-		assert.Equal(t, "alice@example.com", string(userinfo.Email))
-		assert.True(t, bool(userinfo.EmailVerified))
-		assert.Equal(t, "Alice Smith", userinfo.Name)
-		assert.Equal(t, "Alice", userinfo.GivenName)
-		assert.Equal(t, "alice@example.com", userinfo.PreferredUsername)
-	})
+	assert.Equal(t, "cognito-user-sub-123", userinfo.Subject)
+	assert.Empty(t, userinfo.Email, "subject must never be synthesised into email")
+	assert.Empty(t, userinfo.PreferredUsername)
+	assert.False(t, bool(userinfo.EmailVerified))
 }
+
+// aliceClaims is the rich Cognito claim set used by the split-Lambda tests.
+func aliceClaims() SubjectClaims {
+	return SubjectClaims{
+		Sub:              "cognito-sub-alice",
+		Email:            "alice@example.com",
+		EmailVerified:    true,
+		GivenName:        "Alice",
+		FamilyName:       "Smith",
+		Groups:           []string{"admins", "users"},
+		CustomAttributes: map[string]string{"department": "engineering", "tenant_id": "t-42"},
+	}
+}
+
+// assertAliceUserinfo checks that a userinfo carries Alice's real claims — the
+// address (not the sub), the verified flag, the names and the groups.
+func assertAliceUserinfo(t *testing.T, ui *oidc.UserInfo) {
+	t.Helper()
+	assert.Equal(t, "cognito-sub-alice", ui.Subject)
+	assert.Equal(t, "alice@example.com", ui.Email, "email must be the real address, not the subject")
+	assert.True(t, bool(ui.EmailVerified))
+	assert.Equal(t, "Alice", ui.GivenName)
+	assert.Equal(t, "Smith", ui.FamilyName)
+	assert.Equal(t, "Alice Smith", ui.Name)
+	assert.Equal(t, "alice@example.com", ui.PreferredUsername)
+	assert.Equal(t, []string{"admins", "users"}, ui.Claims["groups"])
+}
+
+// newStorageOver creates a fresh Storage (as a cold Lambda would) sharing the
+// given config and session databases with other instances.
+func newStorageOver(t *testing.T, configDB, sessionDB *store.MemoryDB) *Storage {
+	t.Helper()
+	mock := newMockKMSClient(t)
+	joseSigner, err := internalcrypto.NewKMSJoseSigner("test-key-id", mock)
+	require.NoError(t, err)
+	return NewStorage(
+		store.NewAppStore(configDB, "test"),
+		store.NewClaimStore(configDB, "test"),
+		store.NewSourceStore(configDB, "test"),
+		joseSigner, sessionDB, "test-key-id",
+	)
+}
+
+// TestClaims_SurviveSplitLambda is the M-2 regression. Login (oidc-authorize),
+// code exchange (oidc-token) and userinfo (oidc-discovery) run on separate
+// Lambdas, so three independent Storage instances over one database must
+// produce an ID token (code grant and refresh grant) and a userinfo response
+// carrying the real Cognito claims. Before the fix the claims lived in a
+// process-local cache and every other instance fell back to email = sub.
+func TestClaims_SurviveSplitLambda(t *testing.T) {
+	configDB := store.NewMemoryDB()
+	sessionDB := store.NewMemoryDB()
+	ctx := op.ContextWithIssuer(context.Background(), "https://idp.example.com/t/tenant-a/oidc")
+
+	// --- oidc-authorize: login completes the auth request and saves a code.
+	storageA := newStorageOver(t, configDB, sessionDB)
+	clientID := seedOIDCClient(t, storageA.appStore, "tenant-a")
+	created, err := storageA.CreateAuthRequest(ctx, &oidc.AuthRequest{
+		ClientID:     clientID,
+		RedirectURI:  "https://app.example.com/callback",
+		Scopes:       oidc.SpaceDelimitedArray{"openid", "email", "profile", "offline_access"},
+		ResponseType: oidc.ResponseTypeCode,
+	}, "")
+	require.NoError(t, err)
+	require.NoError(t, storageA.CompleteAuthRequest(ctx, created.GetID(), aliceClaims()))
+	const code = "split-lambda-code"
+	require.NoError(t, storageA.SaveAuthCode(ctx, created.GetID(), code))
+
+	// --- oidc-token: a fresh instance exchanges the code.
+	storageB := newStorageOver(t, configDB, sessionDB)
+	loaded, err := storageB.AuthRequestByCode(ctx, code)
+	require.NoError(t, err)
+	accessToken, refreshToken, _, err := storageB.CreateAccessAndRefreshTokens(ctx, loaded, "")
+	require.NoError(t, err)
+
+	idTokenInfo := new(oidc.UserInfo)
+	require.NoError(t, storageB.SetUserinfoFromScopes(ctx, idTokenInfo, loaded.GetSubject(), clientID, loaded.GetScopes()))
+	require.NoError(t, storageB.SetUserinfoFromRequest(ctx, idTokenInfo, loaded.(*AuthRequest), loaded.GetScopes()))
+	assertAliceUserinfo(t, idTokenInfo)
+
+	// --- oidc-discovery: a third instance serves userinfo from the bearer.
+	storageC := newStorageOver(t, configDB, sessionDB)
+	ui := new(oidc.UserInfo)
+	require.NoError(t, storageC.SetUserinfoFromToken(ctx, ui, accessToken, "cognito-sub-alice", ""))
+	assertAliceUserinfo(t, ui)
+
+	// Introspection on the same instance reads the same record.
+	intro := new(oidc.IntrospectionResponse)
+	require.NoError(t, storageC.SetIntrospectionFromToken(ctx, intro, accessToken, "cognito-sub-alice", clientID))
+	assert.True(t, intro.Active)
+	assert.Equal(t, "alice@example.com", intro.Email)
+	assert.Equal(t, "alice@example.com", intro.Username)
+	assert.True(t, bool(intro.EmailVerified))
+	assert.Equal(t, "Alice Smith", intro.Name)
+	assert.Equal(t, "Alice", intro.GivenName)
+	assert.Equal(t, "Smith", intro.FamilyName)
+
+	// --- oidc-token again: refresh grant on an instance that never saw login.
+	rr, err := storageB.TokenRequestByRefreshToken(ctx, refreshToken)
+	require.NoError(t, err)
+	refreshInfo := new(oidc.UserInfo)
+	require.NoError(t, storageB.SetUserinfoFromScopes(ctx, refreshInfo, rr.GetSubject(), clientID, rr.GetScopes()))
+	require.NoError(t, storageB.SetUserinfoFromRequest(ctx, refreshInfo, rr.(*refreshTokenRequest), rr.GetScopes()))
+	assertAliceUserinfo(t, refreshInfo)
+
+	// The rotated pair carries the claims too — userinfo for the new access
+	// token on yet another fresh instance.
+	newAccess, _, _, err := storageB.CreateAccessAndRefreshTokens(ctx, rr.(*refreshTokenRequest), refreshToken)
+	require.NoError(t, err)
+	ui2 := new(oidc.UserInfo)
+	require.NoError(t, newStorageOver(t, configDB, sessionDB).SetUserinfoFromToken(ctx, ui2, newAccess, "cognito-sub-alice", ""))
+	assertAliceUserinfo(t, ui2)
+}
+
+// TestUserinfo_NoEmailClaim_OmitsEmail: when Cognito supplies no email the
+// claim is omitted — the subject is never substituted for it and the address
+// is never advertised as verified.
+func TestUserinfo_NoEmailClaim_OmitsEmail(t *testing.T) {
+	s, appStore, _, _ := newTestStorage(t)
+	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "tenant-a")
+
+	created, err := s.CreateAuthRequest(ctx, &oidc.AuthRequest{
+		ClientID:     clientID,
+		RedirectURI:  "https://app.example.com/callback",
+		Scopes:       oidc.SpaceDelimitedArray{"openid", "email", "profile"},
+		ResponseType: oidc.ResponseTypeCode,
+	}, "")
+	require.NoError(t, err)
+	require.NoError(t, s.CompleteAuthRequest(ctx, created.GetID(), SubjectClaims{
+		Sub: "sub-no-email", GivenName: "No", FamilyName: "Mail",
+	}))
+	loaded, err := s.AuthRequestByID(ctx, created.GetID())
+	require.NoError(t, err)
+
+	// ID-token path.
+	ui := new(oidc.UserInfo)
+	require.NoError(t, s.SetUserinfoFromScopes(ctx, ui, "sub-no-email", clientID, loaded.GetScopes()))
+	require.NoError(t, s.SetUserinfoFromRequest(ctx, ui, loaded.(*AuthRequest), loaded.GetScopes()))
+	assert.Equal(t, "sub-no-email", ui.Subject)
+	assert.Empty(t, ui.Email)
+	assert.False(t, bool(ui.EmailVerified))
+	assert.Empty(t, ui.PreferredUsername)
+	assert.Equal(t, "No Mail", ui.Name)
+
+	// Userinfo + introspection path.
+	accessToken, _, err := s.CreateAccessToken(ctx, loaded)
+	require.NoError(t, err)
+	ui2 := new(oidc.UserInfo)
+	require.NoError(t, s.SetUserinfoFromToken(ctx, ui2, accessToken, "sub-no-email", ""))
+	assert.Empty(t, ui2.Email)
+	assert.False(t, bool(ui2.EmailVerified))
+	assert.Empty(t, ui2.PreferredUsername)
+
+	intro := new(oidc.IntrospectionResponse)
+	require.NoError(t, s.SetIntrospectionFromToken(ctx, intro, accessToken, "sub-no-email", clientID))
+	assert.Empty(t, intro.Email)
+	assert.Empty(t, intro.Username)
+	assert.False(t, bool(intro.EmailVerified))
+}
+
+// TestClaimMappings_AppliedToIDTokenAndUserinfo: the per-app claim and role
+// mappings (previously only honoured by the SAML assertion maker) are emitted
+// under their target names in the ID token, userinfo and JWT private claims,
+// and a mapping that targets a standard claim is ignored.
+func TestClaimMappings_AppliedToIDTokenAndUserinfo(t *testing.T) {
+	s, appStore, claimStore, _ := newTestStorage(t)
+	ctx := op.ContextWithIssuer(context.Background(), "https://idp.example.com/t/tenant-a/oidc")
+	clientID := seedOIDCClient(t, appStore, "tenant-a")
+
+	require.NoError(t, claimStore.PutClaimMappings(ctx, "tenant-a", clientID, []tenant.ClaimMapping{
+		{Name: "dept", SourceType: "cognito", SourceAttribute: "department", TargetAttribute: "department"},
+		{Name: "tenant", SourceType: "attribute", SourceAttribute: "custom:tenant_id", TargetAttribute: "tenant_id"},
+		{Name: "roles", SourceType: "groupMapping", SourceAttribute: "groups", TargetAttribute: "roles"},
+		{Name: "env", SourceType: "static", DefaultValue: "production", TargetAttribute: "environment"},
+		{Name: "full", SourceType: "cognito", SourceAttribute: "name", TargetAttribute: "display_name"},
+		{Name: "missing", SourceType: "cognito", SourceAttribute: "cost_center", TargetAttribute: "cost_center", DefaultValue: "unassigned"},
+		{Name: "absent", SourceType: "cognito", SourceAttribute: "nothing", TargetAttribute: "nothing"},
+		// Hostile: must not be able to overwrite standard claims.
+		{Name: "evil-email", SourceType: "cognito", SourceAttribute: "department", TargetAttribute: "email"},
+		{Name: "evil-sub", SourceType: "static", DefaultValue: "someone-else", TargetAttribute: "sub"},
+		{Name: "evil-verified", SourceType: "static", DefaultValue: "true", TargetAttribute: "email_verified"},
+	}))
+	require.NoError(t, claimStore.PutRoleMappings(ctx, "tenant-a", clientID, []tenant.RoleMapping{
+		{CognitoGroup: "admins", MappedValue: "app-admin"},
+		{CognitoGroup: "unrelated", MappedValue: "never"},
+	}))
+
+	created, err := s.CreateAuthRequest(ctx, &oidc.AuthRequest{
+		ClientID:     clientID,
+		RedirectURI:  "https://app.example.com/callback",
+		Scopes:       oidc.SpaceDelimitedArray{"openid", "email", "profile"},
+		ResponseType: oidc.ResponseTypeCode,
+	}, "")
+	require.NoError(t, err)
+	require.NoError(t, s.CompleteAuthRequest(ctx, created.GetID(), aliceClaims()))
+	loaded, err := s.AuthRequestByID(ctx, created.GetID())
+	require.NoError(t, err)
+
+	assertMapped := func(t *testing.T, claims map[string]any) {
+		t.Helper()
+		assert.Equal(t, "engineering", claims["department"])
+		assert.Equal(t, "t-42", claims["tenant_id"])
+		assert.Equal(t, []string{"app-admin"}, claims["roles"])
+		assert.Equal(t, "production", claims["environment"])
+		assert.Equal(t, "Alice Smith", claims["display_name"])
+		assert.Equal(t, "unassigned", claims["cost_center"])
+		assert.NotContains(t, claims, "nothing")
+		assert.Equal(t, []string{"admins", "users"}, claims["groups"])
+		// Reserved targets are skipped.
+		assert.NotContains(t, claims, "email")
+		assert.NotContains(t, claims, "sub")
+		assert.NotContains(t, claims, "email_verified")
+	}
+
+	// ID token.
+	ui := new(oidc.UserInfo)
+	require.NoError(t, s.SetUserinfoFromRequest(ctx, ui, loaded.(*AuthRequest), loaded.GetScopes()))
+	assertMapped(t, ui.Claims)
+	assert.Equal(t, "alice@example.com", ui.Email, "standard email is untouched by the hostile mapping")
+	assert.True(t, bool(ui.EmailVerified))
+
+	// Userinfo from the access token.
+	accessToken, _, err := s.CreateAccessToken(ctx, loaded)
+	require.NoError(t, err)
+	ui2 := new(oidc.UserInfo)
+	require.NoError(t, s.SetUserinfoFromToken(ctx, ui2, accessToken, "cognito-sub-alice", ""))
+	assertMapped(t, ui2.Claims)
+
+	// JWT access-token private claims.
+	priv, err := s.GetPrivateClaimsFromRequest(ctx, loaded, []string{"openid"})
+	require.NoError(t, err)
+	assertMapped(t, priv)
+
+	// Deprecated scope-based hook contributes nothing.
+	legacy, err := s.GetPrivateClaimsFromScopes(ctx, "cognito-sub-alice", clientID, []string{"openid"})
+	require.NoError(t, err)
+	assert.Nil(t, legacy)
+}
+
+// TestClaimMappings_NoneConfigured: an app without mappings still gets groups
+// and nothing else; a subject without groups gets no private claims at all.
+func TestClaimMappings_NoneConfigured(t *testing.T) {
+	s, appStore, _, _ := newTestStorage(t)
+	ctx := op.ContextWithIssuer(context.Background(), "https://idp.example.com/t/tenant-a/oidc")
+	clientID := seedOIDCClient(t, appStore, "tenant-a")
+
+	created, err := s.CreateAuthRequest(ctx, &oidc.AuthRequest{
+		ClientID: clientID, RedirectURI: "https://app.example.com/callback",
+		Scopes: oidc.SpaceDelimitedArray{"openid"}, ResponseType: oidc.ResponseTypeCode,
+	}, "")
+	require.NoError(t, err)
+	require.NoError(t, s.CompleteAuthRequest(ctx, created.GetID(), aliceClaims()))
+	loaded, err := s.AuthRequestByID(ctx, created.GetID())
+	require.NoError(t, err)
+
+	priv, err := s.GetPrivateClaimsFromRequest(ctx, loaded, []string{"openid"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"groups": []string{"admins", "users"}}, priv)
+
+	// No groups → nil.
+	ar := loaded.(*AuthRequest)
+	ar.CognitoGroups = nil
+	priv, err = s.GetPrivateClaimsFromRequest(ctx, ar, []string{"openid"})
+	require.NoError(t, err)
+	assert.Nil(t, priv)
+
+	// An unrelated request type carries nothing.
+	assert.NoError(t, s.SetUserinfoFromRequest(ctx, new(oidc.UserInfo), plainTokenRequest{}, []string{"email"}))
+}
+
+// plainTokenRequest is an op.IDTokenRequest of a type the storage does not
+// know; it must be ignored rather than mistaken for a claim-bearing request.
+type plainTokenRequest struct{}
+
+func (plainTokenRequest) GetAMR() []string       { return nil }
+func (plainTokenRequest) GetAudience() []string  { return nil }
+func (plainTokenRequest) GetAuthTime() time.Time { return time.Time{} }
+func (plainTokenRequest) GetClientID() string    { return "" }
+func (plainTokenRequest) GetScopes() []string    { return nil }
+func (plainTokenRequest) GetSubject() string     { return "anon" }

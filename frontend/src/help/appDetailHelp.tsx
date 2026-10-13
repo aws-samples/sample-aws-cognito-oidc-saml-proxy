@@ -19,10 +19,13 @@ export const appOverviewHelp: HelpContent = {
         <li><strong>Protocol</strong> — SAML or OIDC settings (endpoints, signing, lifetimes).</li>
         <li><strong>Custom login</strong> — optionally replace the Cognito Hosted UI with your own login page.</li>
         <li>
-          <strong>Mappings</strong> — claim and role mappings released to the app. An SP
+          <strong>Mappings</strong> — claim and role mappings released to the app. A SAML SP
           receives <em>only</em> the attributes mapped here; unmapped Cognito attributes,
           raw groups and library defaults are never released, and an app with no mappings
-          gets a Subject-only assertion.
+          gets a Subject-only assertion. For an OIDC RP the mappings are added to the ID
+          token and the UserInfo response alongside the standard scope claims and
+          <code>groups</code>; a mapping cannot target a standard claim such as
+          <code>sub</code> or <code>email</code>.
         </li>
         <li><strong>Integration</strong> — copy/paste endpoints, certificate, and quick-start snippets to configure the app.</li>
       </ul>

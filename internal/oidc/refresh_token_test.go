@@ -33,9 +33,11 @@ func issueRefreshToken(t *testing.T, s *Storage, clientID string) (accessToken, 
 	ar.IsDone = true
 	ar.AuthTime = time.Now()
 	ar.CognitoEmail = "user@example.com"
+	ar.CognitoEmailVerified = true
 	ar.CognitoGivenName = "Ada"
 	ar.CognitoFamilyName = "Lovelace"
 	ar.CognitoGroups = []string{"engineers"}
+	ar.CognitoCustomAttributes = map[string]string{"department": "maths"}
 
 	accessToken, refreshToken, _, err = s.CreateAccessAndRefreshTokens(ctx, ar, "")
 	require.NoError(t, err)
@@ -67,23 +69,37 @@ func TestRefreshToken_PreservesCognitoClaims(t *testing.T) {
 
 	accessToken, refreshToken := issueRefreshToken(t, s, clientID)
 
-	// Simulate a fresh Lambda invocation with an empty in-memory cache.
-	s.userClaims.Range(func(k, _ any) bool {
-		s.userClaims.Delete(k)
-		return true
-	})
-
-	// Resolving the refresh token must repopulate the claims cache so the
-	// re-issued ID token / userinfo stays fully populated.
-	_, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
+	// The refresh request rebuilt from the stored item carries the full claim
+	// set, so the re-issued ID token is populated without any process state.
+	rr, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
 	require.NoError(t, err)
+	rtr := rr.(*refreshTokenRequest)
+	assert.Equal(t, SubjectClaims{
+		Sub:              "user@example.com",
+		Email:            "user@example.com",
+		EmailVerified:    true,
+		GivenName:        "Ada",
+		FamilyName:       "Lovelace",
+		Groups:           []string{"engineers"},
+		CustomAttributes: map[string]string{"department": "maths"},
+	}, rtr.claims)
 
-	// userinfo is served against the live access token minted above.
+	idTokenInfo := new(oidc.UserInfo)
+	require.NoError(t, s.SetUserinfoFromRequest(ctx, idTokenInfo, rtr, rr.GetScopes()))
+	assert.Equal(t, "user@example.com", idTokenInfo.Email)
+	assert.True(t, bool(idTokenInfo.EmailVerified))
+	assert.Equal(t, "Ada", idTokenInfo.GivenName)
+	assert.Equal(t, []string{"engineers"}, idTokenInfo.Claims["groups"])
+
+	// userinfo is served against the live access token minted above, from the
+	// claims persisted on that record.
 	userinfo := new(oidc.UserInfo)
 	require.NoError(t, s.SetUserinfoFromToken(ctx, userinfo, accessToken, "user@example.com", ""))
 	assert.Equal(t, "user@example.com", string(userinfo.Email))
+	assert.True(t, bool(userinfo.EmailVerified))
 	assert.Equal(t, "Ada", userinfo.GivenName)
 	assert.Equal(t, "Lovelace", userinfo.FamilyName)
+	assert.Equal(t, []string{"engineers"}, userinfo.Claims["groups"])
 }
 
 func TestRefreshToken_RotationRevokesOld(t *testing.T) {
@@ -124,19 +140,17 @@ func TestRefreshToken_RotationCarriesClaimsForward(t *testing.T) {
 	newAccessToken, newToken, _, err := s.CreateAccessAndRefreshTokens(ctx, rr.(*refreshTokenRequest), oldToken)
 	require.NoError(t, err)
 
-	// Clear cache to prove the claims came from the persisted rotated token.
-	s.userClaims.Range(func(k, _ any) bool {
-		s.userClaims.Delete(k)
-		return true
-	})
-
-	_, err = s.TokenRequestByRefreshToken(ctx, newToken)
+	// The rotated refresh token record carries the claims forward.
+	rr2, err := s.TokenRequestByRefreshToken(ctx, newToken)
 	require.NoError(t, err)
+	assert.Equal(t, rr.(*refreshTokenRequest).claims, rr2.(*refreshTokenRequest).claims)
 
 	// userinfo is served against the live access token minted by the rotation.
 	userinfo := new(oidc.UserInfo)
 	require.NoError(t, s.SetUserinfoFromToken(ctx, userinfo, newAccessToken, "user@example.com", ""))
+	assert.Equal(t, "user@example.com", userinfo.Email)
 	assert.Equal(t, "Ada", userinfo.GivenName)
+	assert.Equal(t, []string{"engineers"}, userinfo.Claims["groups"])
 }
 
 func TestRefreshToken_Expired(t *testing.T) {

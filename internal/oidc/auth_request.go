@@ -36,6 +36,10 @@ type AuthRequest struct {
 	CognitoFamilyName    string   `dynamo:"cognitoFamilyName" json:"cognitoFamilyName,omitempty"`
 	CognitoEmailVerified bool     `dynamo:"cognitoEmailVerified" json:"cognitoEmailVerified,omitempty"`
 	CognitoGroups        []string `dynamo:"cognitoGroups" json:"cognitoGroups,omitempty"`
+	// CognitoCustomAttributes holds the custom:* attributes (prefix stripped)
+	// so per-app claim mappings can be evaluated on the token endpoint, which
+	// runs on a different Lambda from the login that captured them.
+	CognitoCustomAttributes map[string]string `dynamo:"cognitoCustomAttributes,omitempty" json:"cognitoCustomAttributes,omitempty"`
 }
 
 func (a *AuthRequest) GetID() string                         { return a.ID }
