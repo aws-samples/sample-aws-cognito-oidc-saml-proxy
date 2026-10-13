@@ -87,7 +87,7 @@ func WithVerifierFactory(factory func(poolID, region string) cognito.IDTokenVeri
 // serve login/callback routes; Encode/Decode will return ErrCookieSigningDisabled
 // so any mis-routed request fails closed instead of operating under a weak key.
 func NewLoginHandler(storage *Storage, apps domain.AppReader, sources domain.SourceReader, audit domain.AuditRepository, hmacKey []byte, baseURL string, pendingStore *store.PendingLoginStore, opts ...LoginHandlerOption) (*LoginHandler, error) {
-	sc, err := proxycrypto.NewSignedCookie(hmacKey)
+	sc, err := proxycrypto.NewSignedCookie(hmacKey, proxycrypto.CookiePurposeOIDC)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialise signed-cookie: %w", err)
 	}

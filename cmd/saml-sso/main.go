@@ -6,11 +6,8 @@ import (
 	"os"
 
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
-	"github.com/aws/aws-sdk-go-v2/service/kms"
-	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	chiadapter "github.com/awslabs/aws-lambda-go-api-proxy/chi"
 	"github.com/go-chi/chi/v5"
@@ -103,8 +100,15 @@ func init() {
 		os.Exit(1)
 	}
 
-	// Derive cookie encryption key from KMS
-	hmacKey := deriveHMACKey(awsCfg, cfg.KMSEncryptionKeyID)
+	// M-3: fetch the shared cookie root key from Secrets Manager. Every saml-sso
+	// instance must use the same key so a saml_flow / saml_session / login
+	// binding cookie minted by one instance is readable by all the others. Fail
+	// closed at boot rather than run on a per-instance key.
+	hmacKey, err := crypto.FetchCookieKey(context.Background(), smClient, cfg.CookieKeySecretARN)
+	if err != nil {
+		slog.Error("failed to fetch cookie key", "error", err)
+		os.Exit(1)
+	}
 
 	// SAML components
 	spProvider := saml.NewSPProvider(appStore)
@@ -178,17 +182,4 @@ func setupLogging(logLevel string) {
 		level = slog.LevelError
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
-}
-
-func deriveHMACKey(awsCfg aws.Config, encKeyID string) []byte {
-	kmsClient := kms.NewFromConfig(awsCfg)
-	dataKeyOut, err := kmsClient.GenerateDataKey(context.Background(), &kms.GenerateDataKeyInput{
-		KeyId:   &encKeyID,
-		KeySpec: kmstypes.DataKeySpecAes256,
-	})
-	if err != nil {
-		slog.Error("failed to generate data key from KMS", "error", err)
-		os.Exit(1)
-	}
-	return dataKeyOut.Plaintext
 }

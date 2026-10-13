@@ -34,66 +34,66 @@ locals {
       config_ddb_actions  = local.ddb_write_actions
       session_ddb_actions = local.ddb_write_actions
       kms_sign            = true
-      kms_encrypt         = true
       kms_get_public_key  = true
       cognito             = true
       cw_logs_audit       = true
       sm_oidc_key         = false
+      sm_cookie_key       = true
       sm_edge_key         = true
     }
     saml-slo = {
       config_ddb_actions  = local.ddb_read_actions
       session_ddb_actions = local.ddb_write_actions
       kms_sign            = false
-      kms_encrypt         = false
       kms_get_public_key  = false
       cognito             = false
       cw_logs_audit       = true
       sm_oidc_key         = false
+      sm_cookie_key       = false
       sm_edge_key         = true
     }
     saml-metadata = {
       config_ddb_actions  = local.ddb_write_actions
       session_ddb_actions = []
       kms_sign            = true
-      kms_encrypt         = false
       kms_get_public_key  = true
       cognito             = false
       cw_logs_audit       = false
       sm_oidc_key         = false
+      sm_cookie_key       = false
       sm_edge_key         = true
     }
     oidc-authorize = {
       config_ddb_actions  = local.ddb_read_actions
       session_ddb_actions = local.ddb_write_actions
       kms_sign            = true
-      kms_encrypt         = true
       kms_get_public_key  = true
       cognito             = true
       cw_logs_audit       = true
       sm_oidc_key         = true
+      sm_cookie_key       = true
       sm_edge_key         = true
     }
     oidc-token = {
       config_ddb_actions  = local.ddb_read_actions
       session_ddb_actions = local.ddb_write_actions
       kms_sign            = true
-      kms_encrypt         = false
       kms_get_public_key  = true
       cognito             = false
       cw_logs_audit       = true
       sm_oidc_key         = true
+      sm_cookie_key       = false
       sm_edge_key         = true
     }
     oidc-discovery = {
       config_ddb_actions  = local.ddb_read_actions
       session_ddb_actions = []
       kms_sign            = false
-      kms_encrypt         = false
       kms_get_public_key  = true
       cognito             = false
       cw_logs_audit       = false
       sm_oidc_key         = true
+      sm_cookie_key       = false
       sm_edge_key         = true
     }
     management-api = {
@@ -106,22 +106,22 @@ locals {
       config_ddb_actions  = concat(local.ddb_write_actions, ["dynamodb:Scan"])
       session_ddb_actions = concat(local.ddb_write_actions, ["dynamodb:Scan"])
       kms_sign            = true # CSR generation signs with the KMS key; import reads the public key
-      kms_encrypt         = false
       kms_get_public_key  = true
       cognito             = false
       cw_logs_audit       = true # onboarding service calls auditLogger (PutLogEvents); read access below is additive
       sm_oidc_key         = false
+      sm_cookie_key       = false
       sm_edge_key         = true
     }
     health = {
       config_ddb_actions  = []
       session_ddb_actions = []
       kms_sign            = false
-      kms_encrypt         = false
       kms_get_public_key  = false
       cognito             = false
       cw_logs_audit       = false
       sm_oidc_key         = false
+      sm_cookie_key       = false
       sm_edge_key         = false # health function has no config.Load and needs no edge gate
     }
   }
@@ -156,14 +156,15 @@ locals {
 
   fn_env_vars = {
     saml-sso = merge(local.fn_common_env, {
-      PROXY_DYNAMODB_TABLE        = module.dynamodb.dynamodb_table_id
-      PROXY_SESSION_TABLE         = module.dynamodb_session.dynamodb_table_id
-      PROXY_KMS_KEY_ID            = module.kms_saml_signing.key_id
-      PROXY_KMS_KEY_ID_BACKUP     = local.backup_signing_key_id
-      PROXY_KMS_ENCRYPTION_KEY_ID = module.kms_encryption.key_id
-      PROXY_ENTITY_ID             = var.saml_entity_id
-      PROXY_BASE_URL              = local.base_url
-      PROXY_TENANT_MODE           = "pool"
+      PROXY_DYNAMODB_TABLE    = module.dynamodb.dynamodb_table_id
+      PROXY_SESSION_TABLE     = module.dynamodb_session.dynamodb_table_id
+      PROXY_KMS_KEY_ID        = module.kms_saml_signing.key_id
+      PROXY_KMS_KEY_ID_BACKUP = local.backup_signing_key_id
+      PROXY_ENTITY_ID         = var.saml_entity_id
+      PROXY_BASE_URL          = local.base_url
+      PROXY_TENANT_MODE       = "pool"
+      # M-3: shared root key for signed/encrypted login cookies.
+      PROXY_COOKIE_KEY_SECRET_ARN = aws_secretsmanager_secret.cookie_key.arn
     })
     saml-slo = merge(local.fn_common_env, {
       PROXY_DYNAMODB_TABLE = module.dynamodb.dynamodb_table_id
@@ -181,17 +182,18 @@ locals {
       PROXY_TENANT_MODE       = "pool"
     })
     oidc-authorize = merge(local.fn_common_env, {
-      PROXY_DYNAMODB_TABLE        = module.dynamodb.dynamodb_table_id
-      PROXY_SESSION_TABLE         = module.dynamodb_session.dynamodb_table_id
-      PROXY_KMS_KEY_ID            = module.kms_saml_signing.key_id
-      PROXY_KMS_KEY_ID_BACKUP     = local.backup_signing_key_id
-      PROXY_KMS_ENCRYPTION_KEY_ID = module.kms_encryption.key_id
-      PROXY_ENTITY_ID             = var.saml_entity_id
-      PROXY_BASE_URL              = local.base_url
-      PROXY_ENABLE_OIDC           = "true"
-      PROXY_TENANT_MODE           = "pool"
+      PROXY_DYNAMODB_TABLE    = module.dynamodb.dynamodb_table_id
+      PROXY_SESSION_TABLE     = module.dynamodb_session.dynamodb_table_id
+      PROXY_KMS_KEY_ID        = module.kms_saml_signing.key_id
+      PROXY_KMS_KEY_ID_BACKUP = local.backup_signing_key_id
+      PROXY_ENTITY_ID         = var.saml_entity_id
+      PROXY_BASE_URL          = local.base_url
+      PROXY_ENABLE_OIDC       = "true"
+      PROXY_TENANT_MODE       = "pool"
       # MF-5: shared AES-GCM key for opaque bearer token encryption.
       PROXY_OIDC_CRYPTO_KEY_SECRET_ARN = aws_secretsmanager_secret.oidc_crypto_key.arn
+      # M-3: shared root key for signed/encrypted login cookies.
+      PROXY_COOKIE_KEY_SECRET_ARN = aws_secretsmanager_secret.cookie_key.arn
     })
     oidc-token = merge(local.fn_common_env, {
       PROXY_DYNAMODB_TABLE    = module.dynamodb.dynamodb_table_id
@@ -294,21 +296,10 @@ locals {
         }
       } : {},
 
-      # KMS encryption key — for cookie encryption (GenerateDataKey)
-      caps.kms_encrypt ? {
-        kms_encryption = {
-          effect = "Allow"
-          actions = [
-            "kms:Encrypt",
-            "kms:Decrypt",
-            "kms:GenerateDataKey",
-            "kms:DescribeKey",
-          ]
-          resources = [module.kms_encryption.key_arn]
-        }
-      } : {},
-
-      # KMS encryption key — for DynamoDB SSE (any function reading/writing DDB needs this)
+      # KMS encryption key — for DynamoDB SSE and for Secrets Manager to decrypt
+      # the SM secrets encrypted with this key (edge secret, OIDC crypto key,
+      # cookie key). Any function reading/writing DDB needs this; the two
+      # cookie-key consumers (saml-sso, oidc-authorize) are both DDB writers.
       length(caps.config_ddb_actions) > 0 || length(caps.session_ddb_actions) > 0 ? {
         kms_ddb_encryption = {
           effect = "Allow"
@@ -356,6 +347,16 @@ locals {
           effect    = "Allow"
           actions   = ["secretsmanager:GetSecretValue"]
           resources = [aws_secretsmanager_secret.oidc_crypto_key.arn]
+        }
+      } : {},
+
+      # M-3: Secrets Manager read for the shared cookie root key (saml-sso and
+      # oidc-authorize). Replaces the per-instance kms:GenerateDataKey grant.
+      caps.sm_cookie_key ? {
+        sm_cookie_key = {
+          effect    = "Allow"
+          actions   = ["secretsmanager:GetSecretValue"]
+          resources = [aws_secretsmanager_secret.cookie_key.arn]
         }
       } : {},
 

@@ -34,21 +34,34 @@ type OIDCCryptoKeyClient interface {
 //
 // secretARN may be a full ARN or a secret name; Secrets Manager resolves both.
 func FetchOIDCCryptoKey(ctx context.Context, client OIDCCryptoKeyClient, secretARN string) ([32]byte, error) {
+	raw, err := fetchSecretKey32(ctx, client, secretARN, "OIDC crypto key")
+	if err != nil {
+		return [32]byte{}, err
+	}
+	var key [32]byte
+	copy(key[:], raw)
+	return key, nil
+}
+
+// fetchSecretKey32 is the shared body of FetchOIDCCryptoKey and
+// FetchCookieKey: read a Secrets Manager secret and require exactly 32 bytes
+// of SecretBinary. label names the key in error messages.
+func fetchSecretKey32(ctx context.Context, client OIDCCryptoKeyClient, secretARN, label string) ([]byte, error) {
 	out, err := client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
 		SecretId: aws.String(secretARN),
 	})
 	if err != nil {
-		return [32]byte{}, fmt.Errorf("failed to fetch OIDC crypto key from Secrets Manager: %w", err)
+		return nil, fmt.Errorf("failed to fetch %s from Secrets Manager: %w", label, err)
 	}
 
 	if out.SecretBinary == nil {
-		return [32]byte{}, fmt.Errorf("OIDC crypto key secret %q has no binary value — expected 32-byte SecretBinary", secretARN)
+		return nil, fmt.Errorf("%s secret %q has no binary value — expected 32-byte SecretBinary", label, secretARN)
 	}
 	if len(out.SecretBinary) != 32 {
-		return [32]byte{}, fmt.Errorf("OIDC crypto key secret %q has wrong length: got %d bytes, need exactly 32", secretARN, len(out.SecretBinary))
+		return nil, fmt.Errorf("%s secret %q has wrong length: got %d bytes, need exactly 32", label, secretARN, len(out.SecretBinary))
 	}
 
-	var key [32]byte
-	copy(key[:], out.SecretBinary)
+	key := make([]byte, 32)
+	copy(key, out.SecretBinary)
 	return key, nil
 }

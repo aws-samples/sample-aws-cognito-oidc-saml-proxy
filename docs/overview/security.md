@@ -16,7 +16,11 @@ API layer, cryptographic signing, and the request-handling code.
 
 - **SAML assertions** signed with RSA-SHA256; **OIDC tokens** signed with RS256 — both
   through AWS KMS, so private keys never leave KMS.
-- **Cookie encryption** uses AES-256-GCM with HMAC-SHA256, using separately derived keys.
+- **Cookie encryption**: login cookies are AES-256-GCM encrypted and HMAC-SHA256 signed.
+  A single 32-byte root key lives in AWS Secrets Manager and is shared by every
+  `saml-sso` and `oidc-authorize` instance; each protocol derives its own HMAC and AES
+  subkeys from it (a SAML cookie is never valid on the OIDC surface), and every cookie
+  carries a key-id prefix so a rotated or mismatched key is rejected explicitly.
 - **Per-tenant KMS signing keys** are supported for tenant isolation.
 
 ## Request protection

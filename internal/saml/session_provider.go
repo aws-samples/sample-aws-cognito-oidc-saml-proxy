@@ -198,7 +198,7 @@ func WithAppStore(a domain.AppReader) SessionProviderOption {
 // programming error; callers must supply a properly-sized key or nil.
 func WithHMACKey(key []byte) SessionProviderOption {
 	return func(sp *SessionProvider) {
-		sc, err := proxycrypto.NewSignedCookie(key)
+		sc, err := proxycrypto.NewSignedCookie(key, proxycrypto.CookiePurposeSAML)
 		if err != nil {
 			panic("WithHMACKey: " + err.Error())
 		}
@@ -240,7 +240,7 @@ func NewSessionProvider(opts ...SessionProviderOption) *SessionProvider {
 // client for backward compatibility in tests. It panics if hmacKey is non-nil
 // but not exactly 32 bytes — callers must supply a well-sized key or nil.
 func NewSessionProviderCompat(cognitoAuth *cognito.AuthClient, hmacKey []byte) *SessionProvider {
-	sc, err := proxycrypto.NewSignedCookie(hmacKey)
+	sc, err := proxycrypto.NewSignedCookie(hmacKey, proxycrypto.CookiePurposeSAML)
 	if err != nil {
 		panic("NewSessionProviderCompat: " + err.Error())
 	}
