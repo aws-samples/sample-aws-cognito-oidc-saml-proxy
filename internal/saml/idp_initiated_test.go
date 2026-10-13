@@ -31,6 +31,15 @@ func cognitoClaimsFor(email, sub string) *cognito.UserClaims {
 	}
 }
 
+// emailNameIDConfig is the SAML config the IdP-initiated fixture app uses: an
+// emailAddress NameID sourced from the (verified) email claim.
+func emailNameIDConfig() *tenant.SAMLConfig {
+	return &tenant.SAMLConfig{
+		NameIDFormat: tenant.NameIDFormatEmail,
+		NameIDSource: "email",
+	}
+}
+
 // idpInitiatedEnv wires a full tenant IdP (signer + SP provider + multi-tenant
 // session provider with an injected fake verifier) for IdP-initiated tests.
 type idpInitiatedEnv struct {
@@ -97,7 +106,7 @@ func setupIdPInitiatedEnvWith(t *testing.T, allowIdPInitiated bool) *idpInitiate
 		WithProviderBaseURL("https://idp.example.com"),
 	)
 	verifier := &fakeVerifier{claims: map[string]interface{}{
-		"sub": "user-1", "email": "user@example.com", "given_name": "Test", "family_name": "User",
+		"sub": "user-1", "email": "user@example.com", "email_verified": true, "given_name": "Test", "family_name": "User",
 	}}
 	sessionProv.verifierFactory = func(_, _ string) idTokenVerifier { return verifier }
 	assertMaker := NewAssertionMaker(appStore, claimStore)
@@ -336,9 +345,16 @@ func TestIdPInitiated_DisabledApp_Forbidden(t *testing.T) {
 	assert.Empty(t, env.verifier.gotToken)
 }
 
-// nameIDFromAutoPost extracts the Subject NameID from the base64-encoded
-// SAMLResponse carried in the IdP's HTTP-POST auto-submit HTML form.
-func nameIDFromAutoPost(t *testing.T, pageHTML string) string {
+// autoPostNameID is the Subject NameID element of an emitted assertion.
+type autoPostNameID struct {
+	Format string `xml:"Format,attr"`
+	Value  string `xml:",chardata"`
+}
+
+// subjectNameIDFromAutoPost extracts the Subject NameID (value + Format) from
+// the base64-encoded SAMLResponse carried in the IdP's HTTP-POST auto-submit
+// HTML form.
+func subjectNameIDFromAutoPost(t *testing.T, pageHTML string) autoPostNameID {
 	t.Helper()
 	// The form field looks like: <input ... name="SAMLResponse" value="BASE64"/>
 	marker := `name="SAMLResponse" value="`
@@ -355,12 +371,82 @@ func nameIDFromAutoPost(t *testing.T, pageHTML string) string {
 	var resp struct {
 		Assertion struct {
 			Subject struct {
-				NameID string `xml:"NameID"`
+				NameID autoPostNameID `xml:"NameID"`
 			} `xml:"Subject"`
 		} `xml:"Assertion"`
 	}
 	require.NoError(t, xml.Unmarshal(raw, &resp))
 	return resp.Assertion.Subject.NameID
+}
+
+// nameIDFromAutoPost extracts the Subject NameID value from the auto-post form.
+func nameIDFromAutoPost(t *testing.T, pageHTML string) string {
+	t.Helper()
+	return subjectNameIDFromAutoPost(t, pageHTML).Value
+}
+
+// TestIdPInitiated_UnverifiedEmail_PersistentSubNameID is the M-6 regression:
+// the app asks for an emailAddress NameID, but the verified ID token says
+// email_verified=false. The emitted assertion must NOT carry the (user-chosen)
+// email as its subject; it must carry a persistent NameID equal to the Cognito
+// sub instead. The same app with email_verified=true still gets the email.
+func TestIdPInitiated_UnverifiedEmail_PersistentSubNameID(t *testing.T) {
+	env := setupIdPInitiatedEnv(t)
+	form := url.Values{}
+	form.Set("id_token", "the.id.token")
+	form.Set("entityId", env.entityID)
+
+	// Unverified email: subject falls back to sub / persistent.
+	env.verifier.claims = map[string]interface{}{
+		"sub": "user-unverified", "email": "attacker-chosen@example.com", "email_verified": false,
+	}
+	resp := postIdPInitiateForm(t, env, form, env.trustedOrigin)
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	nameID := subjectNameIDFromAutoPost(t, string(body))
+	assert.Equal(t, "user-unverified", nameID.Value, "unverified email must not be the NameID")
+	assert.Equal(t, tenant.NameIDFormatPersistent, nameID.Format)
+	assert.NotContains(t, nameID.Value, "@")
+
+	// Missing email_verified claim is treated as unverified too.
+	env.verifier.claims = map[string]interface{}{
+		"sub": "user-noclaim", "email": "someone@example.com",
+	}
+	resp = postIdPInitiateForm(t, env, form, env.trustedOrigin)
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	nameID = subjectNameIDFromAutoPost(t, string(body))
+	assert.Equal(t, "user-noclaim", nameID.Value)
+	assert.Equal(t, tenant.NameIDFormatPersistent, nameID.Format)
+
+	// Verified email: the configured emailAddress NameID is issued.
+	env.verifier.claims = map[string]interface{}{
+		"sub": "user-verified", "email": "verified@example.com", "email_verified": true,
+	}
+	resp = postIdPInitiateForm(t, env, form, env.trustedOrigin)
+	body, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	nameID = subjectNameIDFromAutoPost(t, string(body))
+	assert.Equal(t, "verified@example.com", nameID.Value)
+	assert.Equal(t, tenant.NameIDFormatEmail, nameID.Format)
+}
+
+// TestIdPInitiated_TokenWithoutSub_Unauthorized: a token with no `sub` cannot
+// yield a NameID at all, so the launch fails closed.
+func TestIdPInitiated_TokenWithoutSub_Unauthorized(t *testing.T) {
+	env := setupIdPInitiatedEnv(t)
+	env.verifier.claims = map[string]interface{}{"email": "nosub@example.com", "email_verified": true}
+
+	form := url.Values{}
+	form.Set("id_token", "the.id.token")
+	form.Set("entityId", env.entityID)
+	resp := postIdPInitiateForm(t, env, form, env.trustedOrigin)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
 // postIdPInitiateWithCookie POSTs an IdP-initiated request carrying the given
@@ -393,13 +479,14 @@ func TestIdPInitiated_FreshTokenWinsOverExistingCookie(t *testing.T) {
 	env := setupIdPInitiatedEnv(t)
 
 	// A valid, correctly-bound session cookie for a PREVIOUS user Y.
-	prevSession := buildSessionFromClaims(cognitoClaimsFor("previous-user@example.com", "user-prev"))
+	prevSession, err := buildSessionFromClaims(cognitoClaimsFor("previous-user@example.com", "user-prev"), emailNameIDConfig())
+	require.NoError(t, err)
 	cookieY, err := env.sessionProv.encodeBoundSessionCookie(prevSession, "acme", "src-ignored", env.entityID)
 	require.NoError(t, err)
 
 	// The fresh token verifies to user X.
 	env.verifier.claims = map[string]interface{}{
-		"sub": "user-x", "email": "user@example.com", "given_name": "Ex", "family_name": "User",
+		"sub": "user-x", "email": "user@example.com", "email_verified": true, "given_name": "Ex", "family_name": "User",
 	}
 
 	resp := postIdPInitiateWithCookie(t, env, cookieY)
@@ -439,7 +526,8 @@ func TestIdPInitiated_StaleCookie_NoPanic(t *testing.T) {
 func TestIdPInitiated_ForeignCookie_IgnoredNoPanic(t *testing.T) {
 	env := setupIdPInitiatedEnv(t)
 
-	foreignSession := buildSessionFromClaims(cognitoClaimsFor("foreign-user@example.com", "user-foreign"))
+	foreignSession, err := buildSessionFromClaims(cognitoClaimsFor("foreign-user@example.com", "user-foreign"), emailNameIDConfig())
+	require.NoError(t, err)
 	foreignCookie, err := env.sessionProv.encodeBoundSessionCookie(
 		foreignSession, "acme", "src-ignored", "https://other-sp.example.com/saml")
 	require.NoError(t, err)

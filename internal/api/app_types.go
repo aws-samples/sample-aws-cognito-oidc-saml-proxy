@@ -9,8 +9,8 @@ type SAMLConfigInput struct {
 	AcsURL             string   `json:"acsUrl,omitempty" format:"uri" doc:"Primary ACS URL"`
 	AcsURLs            []string `json:"acsUrls,omitempty" doc:"Additional ACS URLs"`
 	MetadataURL        string   `json:"metadataUrl,omitempty" format:"uri" doc:"SP metadata URL"`
-	NameIDFormat       string   `json:"nameIdFormat,omitempty" doc:"NameID format (short code like 'email'/'persistent' or a full SAML NameID-Format URN)"`
-	NameIDSource       string   `json:"nameIdSource,omitempty" doc:"Cognito attribute for NameID"`
+	NameIDFormat       string   `json:"nameIdFormat,omitempty" doc:"NameID format (short code like 'email'/'persistent' or a full SAML NameID-Format URN). An emailAddress NameID is issued only when Cognito asserts email_verified=true; otherwise the gateway falls back to a persistent NameID equal to the Cognito sub."`
+	NameIDSource       string   `json:"nameIdSource,omitempty" doc:"Cognito attribute for the NameID value: 'sub' (default) or 'email'. 'email' is honoured only when the token carries a verified email (email_verified=true); unverified emails fall back to the persistent sub."`
 	SignResponse       *bool    `json:"signResponse,omitempty"`
 	SignAssertion      *bool    `json:"signAssertion,omitempty"`
 	EncryptAssertion   *bool    `json:"encryptAssertion,omitempty"`

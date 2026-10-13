@@ -54,6 +54,24 @@ sequenceDiagram
 | `/t/{tenant}/saml/login/complete` | Custom login page hand-back (ID token + `state`) |
 | `/t/{tenant}/saml/idp-initiate` | IdP-initiated SSO (ID token + `entityId`), per-app opt-in |
 
+## NameID
+
+The Subject `<NameID>` of every assertion is derived from the application's `nameIdFormat`
+and `nameIdSource` together with the **verified** claims of the Cognito ID token:
+
+| Configured format | Issued NameID |
+|---|---|
+| `emailAddress` (or `nameIdSource: email` with any format) | The user's `email`, **only** when Cognito asserts `email_verified=true`. Otherwise a persistent NameID equal to the Cognito `sub` is issued instead, and the fallback is logged (`saml nameid fallback`, reason `email_unverified`). |
+| `persistent` | The Cognito `sub` (stable per user, not user-chosen). |
+| `transient` | A fresh random value per session (the SAML session ID). |
+| `unspecified` / custom URN | The Cognito `sub`, with the configured format echoed unchanged. |
+
+An email address a user typed at sign-up is not an identity until Cognito has verified it,
+so an unverified email is never used as the subject an SP keys its accounts on. A token
+without a `sub` is rejected (HTTP 401). Pairwise (per-SP hashed) persistent identifiers
+are not issued: they would require a secret that is never rotated, which the deployment
+does not provision.
+
 ## Custom login and IdP-initiated SSO
 
 An application may replace the Cognito Managed Login with its own login page

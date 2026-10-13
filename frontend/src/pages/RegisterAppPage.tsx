@@ -206,7 +206,9 @@ export default function RegisterAppPage() {
           encryptAssertion,
           allowIdpInitiated,
           nameIdFormat: nameIdFormat.value,
-          nameIdSource: 'email',
+          // Only an emailAddress NameID is sourced from the (verified) email
+          // claim; persistent and transient subjects are keyed on the Cognito sub.
+          nameIdSource: nameIdFormat.value.endsWith(':emailAddress') ? 'email' : 'sub',
           sessionDurationSec: parseInt(sessionDuration, 10) || 3600,
           clockSkewSec: 60,
         };
