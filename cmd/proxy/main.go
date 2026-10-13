@@ -288,7 +288,10 @@ func main() {
 	sessionProvider.SetPendingLoginStore(pendingLoginStore)
 
 	// Register tenant-scoped SAML routes: /t/{tenant}/saml/*
-	// The tenant middleware is already applied by the router for /t/* routes
+	// RegisterTenantRoutes (and RegisterOIDCRoutes below) install
+	// middleware.TenantFromPath on their own /t/{tenant} route groups, so the
+	// tenant status gate (M-5) is enforced here exactly as in the Lambdas.
+	// api.NewRouter only gates /api/v1/* via TenantFromJWTForAPI.
 	saml.RegisterTenantRoutes(router, saml.TenantRoutesConfig{
 		Handler:     tenantIdPHandler,
 		SessionProv: sessionProvider,
@@ -333,7 +336,7 @@ func main() {
 			slog.Info("OIDC crypto key generated randomly (local dev — set PROXY_OIDC_CRYPTO_KEY_SECRET_ARN for persistence)")
 		}
 
-		if err := proxyoidc.RegisterOIDCRoutes(router, oidcStorage, cfg.BaseURL, appStore, sourceStore, auditLogger, oidcCryptoKey, hmacKey, pendingLoginStore, false); err != nil {
+		if err := proxyoidc.RegisterOIDCRoutes(router, oidcStorage, tenantStore, cfg.BaseURL, appStore, sourceStore, auditLogger, oidcCryptoKey, hmacKey, pendingLoginStore, false); err != nil {
 			slog.Error("failed to register OIDC routes", "error", err)
 			os.Exit(1)
 		}

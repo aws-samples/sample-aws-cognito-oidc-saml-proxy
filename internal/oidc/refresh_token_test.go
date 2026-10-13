@@ -45,25 +45,27 @@ func issueRefreshToken(t *testing.T, s *Storage, clientID string) (accessToken, 
 }
 
 func TestRefreshToken_IssueAndResolve(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	_, refreshToken := issueRefreshToken(t, s, "client-abc")
+	_, refreshToken := issueRefreshToken(t, s, clientID)
 
 	rr, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
 	require.NoError(t, err)
-	assert.Equal(t, "client-abc", rr.GetClientID())
+	assert.Equal(t, clientID, rr.GetClientID())
 	assert.Equal(t, "user@example.com", rr.GetSubject())
-	assert.Equal(t, []string{"client-abc"}, rr.GetAudience())
+	assert.Equal(t, []string{clientID}, rr.GetAudience())
 	assert.Contains(t, rr.GetScopes(), "offline_access")
 	assert.False(t, rr.GetAuthTime().IsZero())
 }
 
 func TestRefreshToken_PreservesCognitoClaims(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	accessToken, refreshToken := issueRefreshToken(t, s, "client-abc")
+	accessToken, refreshToken := issueRefreshToken(t, s, clientID)
 
 	// Simulate a fresh Lambda invocation with an empty in-memory cache.
 	s.userClaims.Range(func(k, _ any) bool {
@@ -85,10 +87,11 @@ func TestRefreshToken_PreservesCognitoClaims(t *testing.T) {
 }
 
 func TestRefreshToken_RotationRevokesOld(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	_, oldToken := issueRefreshToken(t, s, "client-abc")
+	_, oldToken := issueRefreshToken(t, s, clientID)
 
 	// Resolve the original request, then rotate (as the token endpoint does).
 	rr, err := s.TokenRequestByRefreshToken(ctx, oldToken)
@@ -107,14 +110,15 @@ func TestRefreshToken_RotationRevokesOld(t *testing.T) {
 	rr2, err := s.TokenRequestByRefreshToken(ctx, newToken)
 	require.NoError(t, err)
 	assert.Equal(t, "user@example.com", rr2.GetSubject())
-	assert.Equal(t, "client-abc", rr2.GetClientID())
+	assert.Equal(t, clientID, rr2.GetClientID())
 }
 
 func TestRefreshToken_RotationCarriesClaimsForward(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	_, oldToken := issueRefreshToken(t, s, "client-abc")
+	_, oldToken := issueRefreshToken(t, s, clientID)
 	rr, err := s.TokenRequestByRefreshToken(ctx, oldToken)
 	require.NoError(t, err)
 	newAccessToken, newToken, _, err := s.CreateAccessAndRefreshTokens(ctx, rr.(*refreshTokenRequest), oldToken)
@@ -155,13 +159,14 @@ func TestRefreshToken_Expired(t *testing.T) {
 }
 
 func TestRefreshToken_GetRefreshTokenInfo(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	_, refreshToken := issueRefreshToken(t, s, "client-abc")
+	_, refreshToken := issueRefreshToken(t, s, clientID)
 
 	t.Run("valid token", func(t *testing.T) {
-		subject, tokenID, err := s.GetRefreshTokenInfo(ctx, "client-abc", refreshToken)
+		subject, tokenID, err := s.GetRefreshTokenInfo(ctx, clientID, refreshToken)
 		require.NoError(t, err)
 		assert.Equal(t, "user@example.com", subject)
 		assert.Equal(t, refreshToken, tokenID)
@@ -173,21 +178,58 @@ func TestRefreshToken_GetRefreshTokenInfo(t *testing.T) {
 	})
 
 	t.Run("unknown token", func(t *testing.T) {
-		_, _, err := s.GetRefreshTokenInfo(ctx, "client-abc", "nope")
+		_, _, err := s.GetRefreshTokenInfo(ctx, clientID, "nope")
 		assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
 	})
 }
 
 func TestRefreshToken_Revoke(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	_, refreshToken := issueRefreshToken(t, s, "client-abc")
+	_, refreshToken := issueRefreshToken(t, s, clientID)
 
-	oidcErr := s.RevokeToken(ctx, refreshToken, "user@example.com", "client-abc")
+	oidcErr := s.RevokeToken(ctx, refreshToken, "user@example.com", clientID)
 	assert.Nil(t, oidcErr)
 
 	// After revocation the token is no longer resolvable.
+	_, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
+	assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
+}
+
+// TestRefreshToken_DisabledAppRejected is the M-5 regression: a refresh token
+// issued while the application was active must stop working the moment the
+// app is disabled, and the stored token must be dropped so re-enabling the app
+// does not resurrect it.
+func TestRefreshToken_DisabledAppRejected(t *testing.T) {
+	s, appStore, _, _ := newTestStorage(t)
+	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
+
+	_, refreshToken := issueRefreshToken(t, s, clientID)
+	_, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
+	require.NoError(t, err)
+
+	require.NoError(t, appStore.SetStatus(ctx, "test-tenant", clientID, "disabled"))
+
+	_, err = s.TokenRequestByRefreshToken(ctx, refreshToken)
+	assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
+
+	// Re-enabling the app must not bring the token back.
+	require.NoError(t, appStore.SetStatus(ctx, "test-tenant", clientID, "active"))
+	_, err = s.TokenRequestByRefreshToken(ctx, refreshToken)
+	assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
+}
+
+// TestRefreshToken_DeletedAppRejected covers the sibling case where the owning
+// application no longer exists at all.
+func TestRefreshToken_DeletedAppRejected(t *testing.T) {
+	s, _, _, _ := newTestStorage(t)
+	ctx := context.Background()
+
+	_, refreshToken := issueRefreshToken(t, s, "no-such-client")
+
 	_, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
 	assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
 }

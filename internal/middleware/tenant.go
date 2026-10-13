@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/domain"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/store"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/tenant"
 )
@@ -57,9 +58,29 @@ func hasGlobalOperator(groups []string) bool {
 	return false
 }
 
-// TenantFromPath is middleware for /t/{tenant}/* routes (SAML protocol endpoints).
-// It extracts the tenant slug from the URL path, loads the tenant, and adds it to context.
-func TenantFromPath(tenantStore *store.TenantStore) func(http.Handler) http.Handler {
+// TenantFromPathOption customises TenantFromPath.
+type TenantFromPathOption func(*tenantFromPathOptions)
+
+type tenantFromPathOptions struct {
+	suspendedAsNotFound bool
+}
+
+// SuspendedAsNotFound makes TenantFromPath answer 404 "tenant not found" for a
+// non-active tenant instead of 403 "tenant suspended". Use it on endpoints
+// whose existence should not be disclosed for a suspended tenant (metadata).
+func SuspendedAsNotFound() TenantFromPathOption {
+	return func(o *tenantFromPathOptions) { o.suspendedAsNotFound = true }
+}
+
+// TenantFromPath is middleware for /t/{tenant}/* routes (SAML and OIDC
+// protocol endpoints). It extracts the tenant slug from the URL path, loads the
+// tenant, rejects any tenant whose Status is not "active" (M-5), and adds the
+// tenant to the request context.
+func TenantFromPath(tenants domain.TenantReader, opts ...TenantFromPathOption) func(http.Handler) http.Handler {
+	var o tenantFromPathOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Extract tenant slug from path
@@ -78,7 +99,7 @@ func TenantFromPath(tenantStore *store.TenantStore) func(http.Handler) http.Hand
 			}
 
 			// Load tenant from store
-			t, err := tenantStore.Get(r.Context(), slug)
+			t, err := tenants.Get(r.Context(), slug)
 			if err != nil {
 				slog.Warn("tenant not found in store",
 					"slug", slug,
@@ -92,14 +113,21 @@ func TenantFromPath(tenantStore *store.TenantStore) func(http.Handler) http.Hand
 				return
 			}
 
-			// Check tenant status
-			if t.Status == "suspended" {
-				slog.Warn("tenant is suspended",
+			// Check tenant status: anything other than "active" (suspended,
+			// deleted, ...) is refused so protocol endpoints stop serving the
+			// moment an operator suspends the tenant.
+			if t.Status != "active" {
+				slog.Warn("tenant is not active",
 					"slug", slug,
+					"status", t.Status,
 				)
+				status, msg := http.StatusForbidden, "tenant suspended"
+				if o.suspendedAsNotFound {
+					status, msg = http.StatusNotFound, "tenant not found"
+				}
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusForbidden)
-				if err := json.NewEncoder(w).Encode(map[string]string{"error": "tenant suspended"}); err != nil {
+				w.WriteHeader(status)
+				if err := json.NewEncoder(w).Encode(map[string]string{"error": msg}); err != nil {
 					slog.Error("failed to encode response", "error", err)
 				}
 				return

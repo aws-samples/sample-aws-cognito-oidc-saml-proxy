@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/cognito"
 	proxycrypto "github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/crypto"
+	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/middleware"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/store"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/tenant"
 	"github.com/stretchr/testify/assert"
@@ -309,6 +310,131 @@ func TestRegisterTenantRoutes(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = sloResp.Body.Close() }()
 	assert.Equal(t, http.StatusBadRequest, sloResp.StatusCode)
+}
+
+// newTenantRoutesServer builds a router through RegisterTenantRoutes with the
+// given tenant store (so middleware.TenantFromPath is wired) and returns the
+// test server plus the handler for direct ServeMetadata wiring.
+func newTenantRoutesServer(t *testing.T, tenantStore *store.TenantStore, ms *store.MemoryDB) (*httptest.Server, *TenantIdPHandler) {
+	t.Helper()
+	signer, cert := generateTestCert(t)
+	appStore := store.NewAppStore(ms, "test-table")
+	claimStore := store.NewClaimStore(ms, "test-table")
+	sessionStore := store.NewSessionStore(ms, "test-table")
+
+	spProvider := NewSPProvider(appStore)
+	auth := cognito.NewAuthClient("test.auth.eu-north-1.amazoncognito.com", "client-id", "https://idp.example.com/saml/acs", "", "")
+	sessionProv := NewSessionProviderCompat(auth, []byte("test-hmac-key-32-bytes-long!!!!!"))
+	assertMaker := NewAssertionMaker(appStore, claimStore)
+
+	handler := NewTenantIdPHandler(
+		WithSigner(signer),
+		WithCertificate(cert),
+		WithSPProvider(spProvider),
+		WithSessionProvider(sessionProv),
+		WithAssertionMaker(assertMaker),
+		WithBaseURL("https://idp.example.com"),
+	)
+
+	r := chi.NewRouter()
+	RegisterTenantRoutes(r, TenantRoutesConfig{
+		Handler:     handler,
+		SessionProv: sessionProv,
+		Sessions:    sessionStore,
+		Tenants:     tenantStore,
+		Apps:        appStore,
+		Claims:      claimStore,
+		Audit:       store.NewAuditStore(ms, "test-table"),
+	})
+	ts := httptest.NewServer(r)
+	t.Cleanup(ts.Close)
+	return ts, handler
+}
+
+// TestRegisterTenantRoutes_SuspendedTenantRejected is the M-5 regression: with
+// a tenant store wired, every SAML protocol endpoint and the federation
+// discovery document of a suspended tenant answer 403 from
+// middleware.TenantFromPath, while an active tenant is unaffected.
+func TestRegisterTenantRoutes_SuspendedTenantRejected(t *testing.T) {
+	ms := store.NewMemoryStore()
+	tenantStore := store.NewTenantStore(ms, "test-table")
+	ctx := context.Background()
+	require.NoError(t, tenantStore.Create(ctx, &tenant.Tenant{
+		Slug: "suspended", DisplayName: "Suspended", Plan: "free", Status: "suspended",
+	}))
+	require.NoError(t, tenantStore.Create(ctx, &tenant.Tenant{
+		Slug: "acme", DisplayName: "ACME Corp", Plan: "free", Status: "active",
+	}))
+
+	ts, _ := newTenantRoutesServer(t, tenantStore, ms)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	assertForbidden := func(t *testing.T, resp *http.Response) {
+		t.Helper()
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode, string(body))
+		assert.Contains(t, string(body), "tenant suspended")
+	}
+
+	// GET /sso with a (bogus) SAMLRequest → 403 before any SAML parsing.
+	resp, err := client.Get(ts.URL + "/t/suspended/saml/sso?SAMLRequest=Zm9v")
+	require.NoError(t, err)
+	assertForbidden(t, resp)
+
+	// POST /idp-initiate → 403 before any token or origin handling.
+	resp, err = client.PostForm(ts.URL+"/t/suspended/saml/idp-initiate", url.Values{"entity_id": {"https://sp.example.com"}})
+	require.NoError(t, err)
+	assertForbidden(t, resp)
+
+	// Federation discovery → 403.
+	resp, err = client.Get(ts.URL + "/t/suspended/.well-known/federation-configuration")
+	require.NoError(t, err)
+	assertForbidden(t, resp)
+
+	// Metadata via RegisterTenantRoutes (saml-sso / monolith) → 403 too.
+	resp, err = client.Get(ts.URL + "/t/suspended/saml/metadata")
+	require.NoError(t, err)
+	assertForbidden(t, resp)
+
+	// The active tenant still serves metadata and discovery.
+	okResp, err := client.Get(ts.URL + "/t/acme/saml/metadata")
+	require.NoError(t, err)
+	defer func() { _ = okResp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, okResp.StatusCode)
+
+	discResp, err := client.Get(ts.URL + "/t/acme/.well-known/federation-configuration")
+	require.NoError(t, err)
+	defer func() { _ = discResp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, discResp.StatusCode)
+}
+
+// TestServeMetadata_SuspendedTenant_NotFound mirrors the saml-metadata Lambda
+// wiring (TenantFromPath with SuspendedAsNotFound): a suspended tenant's
+// metadata is indistinguishable from a non-existent tenant.
+func TestServeMetadata_SuspendedTenant_NotFound(t *testing.T) {
+	ms := store.NewMemoryStore()
+	tenantStore := store.NewTenantStore(ms, "test-table")
+	require.NoError(t, tenantStore.Create(context.Background(), &tenant.Tenant{
+		Slug: "suspended", DisplayName: "Suspended", Plan: "free", Status: "suspended",
+	}))
+	_, handler := newTenantRoutesServer(t, tenantStore, ms)
+
+	r := chi.NewRouter()
+	r.Route("/t/{tenant}/saml", func(r chi.Router) {
+		r.Use(middleware.TenantFromPath(tenantStore, middleware.SuspendedAsNotFound()))
+		r.Get("/metadata", handler.ServeMetadata)
+	})
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/t/suspended/saml/metadata")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Contains(t, string(body), "tenant not found")
+	assert.NotContains(t, string(body), "suspended")
 }
 
 func TestAppMetadataEndpoint(t *testing.T) {

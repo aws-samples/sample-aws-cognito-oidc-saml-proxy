@@ -79,6 +79,43 @@ func TestTenantFromPath_Suspended(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "tenant suspended")
 }
 
+// TestTenantFromPath_Suspended_NotFoundOption verifies the SuspendedAsNotFound
+// option hides a suspended tenant behind a 404 (used by saml-metadata).
+func TestTenantFromPath_Suspended_NotFoundOption(t *testing.T) {
+	memStore := store.NewMemoryStore()
+	tenantStore := store.NewTenantStore(memStore, "test-table")
+	require.NoError(t, tenantStore.Create(context.Background(), &tenant.Tenant{
+		Slug: "suspended-tenant", DisplayName: "Suspended", Status: "suspended", Plan: "free",
+	}))
+
+	handler := TenantFromPath(tenantStore, SuspendedAsNotFound())(okHandler())
+	req := httptest.NewRequest(http.MethodGet, "/t/suspended-tenant/saml/metadata", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+	assert.Contains(t, rr.Body.String(), "tenant not found")
+	assert.NotContains(t, rr.Body.String(), "suspended")
+}
+
+// TestTenantFromPath_NonActiveStatusRejected is the M-5 regression: any status
+// other than "active" (not just "suspended") must be refused.
+func TestTenantFromPath_NonActiveStatusRejected(t *testing.T) {
+	memStore := store.NewMemoryStore()
+	tenantStore := store.NewTenantStore(memStore, "test-table")
+	require.NoError(t, tenantStore.Create(context.Background(), &tenant.Tenant{
+		Slug: "deleted-tenant", DisplayName: "Deleted", Status: "deleted", Plan: "free",
+	}))
+
+	handler := TenantFromPath(tenantStore)(okHandler())
+	req := httptest.NewRequest(http.MethodGet, "/t/deleted-tenant/saml/sso", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), "tenant suspended")
+}
+
 func TestTenantFromPath_InvalidPath(t *testing.T) {
 	memStore := store.NewMemoryStore()
 	tenantStore := store.NewTenantStore(memStore, "test-table")

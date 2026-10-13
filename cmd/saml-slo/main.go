@@ -41,7 +41,8 @@ func init() {
 	configDB := store.NewDB(dynamoDB, cfg.DynamoDBTable)
 	sessionDB := store.NewDB(dynamoDB, cfg.SessionTable)
 
-	// Config table: app store (to validate SP issuer)
+	// Config table: tenant store (status gate) + app store (to validate SP issuer)
+	tenantStore := store.NewTenantStore(configDB, cfg.DynamoDBTable)
 	appStore := store.NewAppStore(configDB, cfg.DynamoDBTable)
 	// Session table: session + audit + replay stores. The replay store enforces
 	// one-time use of LogoutRequest IDs, mirroring the AuthnRequest guard in the
@@ -84,6 +85,8 @@ func init() {
 	router.Use(middleware.RequireEdgeSecret(edgeSecret))
 
 	router.Route("/t/{tenant}/saml", func(r chi.Router) {
+		// M-5: refuse SLO for a suspended (non-active) tenant.
+		r.Use(middleware.TenantFromPath(tenantStore))
 		r.Get("/slo", sloHandler)
 		r.Post("/slo", sloHandler)
 	})

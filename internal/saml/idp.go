@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	proxycrypto "github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/crypto"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/domain"
+	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/middleware"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/tenant"
 )
 
@@ -710,8 +711,19 @@ func RegisterTenantRoutes(r chi.Router, cfg TenantRoutesConfig) {
 		})
 	}
 
+	// M-5: every tenant-scoped protocol endpoint sits behind the tenant status
+	// gate so a suspended (or otherwise non-active) tenant stops authenticating
+	// immediately. Only handler-only test wiring omits cfg.Tenants.
+	tenantGate := func(next http.Handler) http.Handler { return next }
+	if cfg.Tenants != nil {
+		tenantGate = middleware.TenantFromPath(cfg.Tenants)
+	} else {
+		slog.Warn("tenant gate not wired: TenantRoutesConfig.Tenants is nil (test-only wiring)")
+	}
+
 	sloHandler := HandleSLO(cfg.Handler.baseURL, cfg.Sessions, cfg.Apps, cfg.Audit, cfg.Replay)
 	r.Route("/t/{tenant}/saml", func(r chi.Router) {
+		r.Use(tenantGate)
 		r.Get("/metadata", cfg.Handler.ServeMetadata)
 		r.Get("/metadata/{appId}", cfg.Handler.ServeAppMetadata)
 		r.Get("/sso", cfg.Handler.ServeSSO)
@@ -724,8 +736,8 @@ func RegisterTenantRoutes(r chi.Router, cfg TenantRoutesConfig) {
 		r.Post("/slo", sloHandler)
 	})
 
-	// Federation discovery endpoint
-	r.Get("/t/{tenant}/.well-known/federation-configuration", handleFederationDiscovery(cfg.Handler.baseURL))
+	// Federation discovery endpoint (same tenant gate as the protocol routes)
+	r.With(tenantGate).Get("/t/{tenant}/.well-known/federation-configuration", handleFederationDiscovery(cfg.Handler.baseURL))
 }
 
 // handleFederationDiscovery returns a handler for the federation discovery endpoint.

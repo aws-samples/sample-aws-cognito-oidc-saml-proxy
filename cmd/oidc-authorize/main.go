@@ -42,6 +42,7 @@ func init() {
 	sessionDB := store.NewDB(dynamoDB, cfg.SessionTable)
 
 	// Config table stores
+	tenantStore := store.NewTenantStore(configDB, cfg.DynamoDBTable)
 	appStore := store.NewAppStore(configDB, cfg.DynamoDBTable)
 	claimStore := store.NewClaimStore(configDB, cfg.DynamoDBTable)
 	sourceStore := store.NewSourceStore(configDB, cfg.DynamoDBTable)
@@ -126,7 +127,7 @@ func init() {
 	// fetched from SM above; no-op in local dev (empty ARN → empty secret).
 	router.Use(middleware.RequireEdgeSecret(edgeSecret))
 
-	if err := proxyoidc.RegisterOIDCRoutes(router, oidcStorage, cfg.BaseURL, appStore, sourceStore, auditLogger, cryptoKey, hmacKey, pendingLoginStore, false); err != nil {
+	if err := proxyoidc.RegisterOIDCRoutes(router, oidcStorage, tenantStore, cfg.BaseURL, appStore, sourceStore, auditLogger, cryptoKey, hmacKey, pendingLoginStore, false); err != nil {
 		slog.Error("failed to register OIDC routes", "error", err)
 		os.Exit(1)
 	}

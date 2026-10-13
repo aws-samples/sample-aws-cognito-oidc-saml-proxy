@@ -12,11 +12,12 @@ import (
 )
 
 func TestCreateAccessAndRefreshTokens(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
 	req := &oidc.AuthRequest{
-		ClientID:     "test-client",
+		ClientID:     clientID,
 		RedirectURI:  "https://app.example.com/callback",
 		Scopes:       oidc.SpaceDelimitedArray{"openid", "offline_access"},
 		ResponseType: oidc.ResponseTypeCode,
@@ -33,7 +34,7 @@ func TestCreateAccessAndRefreshTokens(t *testing.T) {
 	// The issued refresh token must be resolvable back to its request.
 	rr, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
 	require.NoError(t, err)
-	assert.Equal(t, "test-client", rr.GetClientID())
+	assert.Equal(t, clientID, rr.GetClientID())
 }
 
 func TestTokenRequestByRefreshToken(t *testing.T) {
@@ -61,10 +62,11 @@ func TestTerminateSession(t *testing.T) {
 // token stayed valid for up to 30 days after logout and could keep minting
 // access tokens.
 func TestTerminateSession_RevokesTokens(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	accessToken, refreshToken := issueRefreshToken(t, s, "client-abc")
+	accessToken, refreshToken := issueRefreshToken(t, s, clientID)
 
 	// Both tokens are live before logout.
 	_, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
@@ -73,7 +75,7 @@ func TestTerminateSession_RevokesTokens(t *testing.T) {
 	require.NoError(t, s.SetUserinfoFromToken(ctx, userinfo, accessToken, "user@example.com", ""))
 
 	// End the session for this (user, client).
-	require.NoError(t, s.TerminateSession(ctx, "user@example.com", "client-abc"))
+	require.NoError(t, s.TerminateSession(ctx, "user@example.com", clientID))
 
 	// The refresh token can no longer mint tokens.
 	_, err = s.TokenRequestByRefreshToken(ctx, refreshToken)
@@ -88,13 +90,14 @@ func TestTerminateSession_RevokesTokens(t *testing.T) {
 // issuer's tenant: ending a session under a different tenant's issuer must not
 // revoke another tenant's tokens, even when the subject and client id collide.
 func TestTerminateSession_TenantScoped(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctxA := op.ContextWithIssuer(context.Background(), "https://idp.example.com/t/tenant-a/oidc")
 	ctxB := op.ContextWithIssuer(context.Background(), "https://idp.example.com/t/tenant-b/oidc")
+	sharedClient := seedOIDCClient(t, appStore, "tenant-a")
 
 	// Mint a refresh token for tenant A.
 	req := &oidc.AuthRequest{
-		ClientID:     "shared-client",
+		ClientID:     sharedClient,
 		RedirectURI:  "https://app.example.com/callback",
 		Scopes:       oidc.SpaceDelimitedArray{"openid", "offline_access"},
 		ResponseType: oidc.ResponseTypeCode,
@@ -109,12 +112,12 @@ func TestTerminateSession_TenantScoped(t *testing.T) {
 	require.NoError(t, err)
 
 	// A logout on tenant B for the same subject+client must not touch tenant A.
-	require.NoError(t, s.TerminateSession(ctxB, "collide@example.com", "shared-client"))
+	require.NoError(t, s.TerminateSession(ctxB, "collide@example.com", sharedClient))
 	_, err = s.TokenRequestByRefreshToken(ctxA, refreshToken)
 	require.NoError(t, err, "tenant B logout must not revoke tenant A's token")
 
 	// The correct tenant's logout does revoke it.
-	require.NoError(t, s.TerminateSession(ctxA, "collide@example.com", "shared-client"))
+	require.NoError(t, s.TerminateSession(ctxA, "collide@example.com", sharedClient))
 	_, err = s.TokenRequestByRefreshToken(ctxA, refreshToken)
 	assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
 }

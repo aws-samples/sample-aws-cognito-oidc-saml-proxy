@@ -17,12 +17,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-jose/go-jose/v4"
 	internalcrypto "github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/crypto"
+	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/domain"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/oidc"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/store"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	zoidc "github.com/zitadel/oidc/v3/pkg/oidc"
+	"github.com/zitadel/oidc/v3/pkg/op"
 )
 
 // mockKMSClient implements crypto.KMSSignerClient for tests.
@@ -46,8 +48,17 @@ func (m *mockKMSClient) PublicKey() (*rsa.PublicKey, error) {
 	return m.publicKey, nil
 }
 
-// setupTestServer creates a test HTTP server with OIDC routes configured.
+// setupTestServer creates a test HTTP server with OIDC routes configured. The
+// tenant status gate is not wired (nil TenantReader) so the conformance tests
+// can use ad-hoc tenant slugs; see setupTestServerWithTenants for the gate.
 func setupTestServer(t *testing.T) (*httptest.Server, *store.AppStore, *store.SourceStore) {
+	t.Helper()
+	return setupTestServerWithTenants(t, nil)
+}
+
+// setupTestServerWithTenants is setupTestServer with an explicit TenantReader
+// backing middleware.TenantFromPath on the /t/{tenant}/oidc group.
+func setupTestServerWithTenants(t *testing.T, tenants domain.TenantReader) (*httptest.Server, *store.AppStore, *store.SourceStore) {
 	t.Helper()
 
 	// Create in-memory stores — separate config and session DBs
@@ -79,7 +90,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *store.AppStore, *store.So
 	r := chi.NewRouter()
 
 	// Register OIDC routes
-	err = oidc.RegisterOIDCRoutes(r, storage, "http://localhost", appStore, sourceStore, nil, cryptoKey, hmacKey, nil, false)
+	err = oidc.RegisterOIDCRoutes(r, storage, tenants, "http://localhost", appStore, sourceStore, nil, cryptoKey, hmacKey, nil, false)
 	require.NoError(t, err)
 
 	// Create test server
@@ -400,6 +411,50 @@ func TestOIDC_TokenEndpoint(t *testing.T) {
 	}
 }
 
+// TestOIDC_SuspendedTenantRejected is the M-5 regression for the OIDC mount:
+// every endpoint under /t/{tenant}/oidc of a suspended tenant must answer 403
+// from middleware.TenantFromPath before zitadel/oidc sees the request, while an
+// active tenant is unaffected.
+func TestOIDC_SuspendedTenantRejected(t *testing.T) {
+	tenantStore := store.NewTenantStore(store.NewMemoryDB(), "test")
+	ctx := context.Background()
+	require.NoError(t, tenantStore.Create(ctx, &tenant.Tenant{
+		Slug: "suspended", DisplayName: "Suspended", Plan: "free", Status: "suspended",
+	}))
+	require.NoError(t, tenantStore.Create(ctx, &tenant.Tenant{
+		Slug: "active", DisplayName: "Active", Plan: "free", Status: "active",
+	}))
+
+	server, appStore, sourceStore := setupTestServerWithTenants(t, tenantStore)
+	suspendedClient := createTestTenantAndApp(t, appStore, sourceStore, "suspended")
+	createTestTenantAndApp(t, appStore, sourceStore, "active")
+
+	// Discovery on the suspended tenant → 403.
+	resp, err := http.Get(server.URL + "/t/suspended/oidc/.well-known/openid-configuration")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	assert.Contains(t, string(body), "tenant suspended")
+
+	// Token endpoint on the suspended tenant → 403 (not a zitadel 400).
+	tokenResp, err := http.PostForm(server.URL+"/t/suspended/oidc/token", url.Values{
+		"grant_type":   {"authorization_code"},
+		"client_id":    {suspendedClient},
+		"code":         {"irrelevant"},
+		"redirect_uri": {"https://app.example.com/callback"},
+	})
+	require.NoError(t, err)
+	defer func() { _ = tokenResp.Body.Close() }()
+	assert.Equal(t, http.StatusForbidden, tokenResp.StatusCode)
+
+	// The active tenant still serves discovery.
+	okResp, err := http.Get(server.URL + "/t/active/oidc/.well-known/openid-configuration")
+	require.NoError(t, err)
+	defer func() { _ = okResp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, okResp.StatusCode)
+}
+
 func TestOIDC_UserInfoEndpoint(t *testing.T) {
 	server, appStore, sourceStore := setupTestServer(t)
 	tenantSlug := "test-tenant"
@@ -442,7 +497,7 @@ func setupRefreshTestServer(t *testing.T) (*httptest.Server, *store.AppStore, *s
 	require.NoError(t, err)
 
 	r := chi.NewRouter()
-	require.NoError(t, oidc.RegisterOIDCRoutes(r, storage, "http://localhost", appStore, sourceStore, nil, cryptoKey, hmacKey, nil, false))
+	require.NoError(t, oidc.RegisterOIDCRoutes(r, storage, nil, "http://localhost", appStore, sourceStore, nil, cryptoKey, hmacKey, nil, false))
 
 	server := httptest.NewServer(r)
 	t.Cleanup(server.Close)
@@ -579,4 +634,66 @@ func TestOIDC_RefreshTokenGrant(t *testing.T) {
 	require.NoError(t, err)
 	defer resp3.Body.Close()
 	assert.Equal(t, http.StatusOK, resp3.StatusCode, "rotated refresh token must be usable")
+}
+
+// TestOIDC_RefreshTokenGrant_DisabledApp is the M-5 regression through the real
+// zitadel/oidc token endpoint: once the application is disabled, a previously
+// valid refresh token must be refused with a proper OAuth error (invalid_client,
+// since the client lookup itself fails closed) — never a new token pair.
+func TestOIDC_RefreshTokenGrant_DisabledApp(t *testing.T) {
+	server, appStore, sourceStore, storage := setupRefreshTestServer(t)
+	tenantSlug := "test-tenant"
+	clientID := createRefreshCapableApp(t, appStore, sourceStore, tenantSlug)
+	ctx := context.Background()
+
+	created, err := storage.CreateAuthRequest(ctx, &zoidc.AuthRequest{
+		ClientID:     clientID,
+		RedirectURI:  "https://app.example.com/callback",
+		Scopes:       zoidc.SpaceDelimitedArray{"openid", "offline_access"},
+		ResponseType: zoidc.ResponseTypeCode,
+	}, "")
+	require.NoError(t, err)
+	require.NoError(t, storage.CompleteAuthRequest(ctx, created.GetID(), "user@example.com",
+		"user@example.com", "Ada", "Lovelace", true, nil))
+	completed, err := storage.AuthRequestByID(ctx, created.GetID())
+	require.NoError(t, err)
+	_, refreshToken, _, err := storage.CreateAccessAndRefreshTokens(ctx, completed, "")
+	require.NoError(t, err)
+
+	// Resolve the token endpoint from discovery (zitadel mounts it at /oauth/token).
+	discResp, err := http.Get(server.URL + "/t/" + tenantSlug + "/oidc/.well-known/openid-configuration")
+	require.NoError(t, err)
+	defer func() { _ = discResp.Body.Close() }()
+	var disc struct {
+		TokenEndpoint string `json:"token_endpoint"`
+	}
+	require.NoError(t, json.NewDecoder(discResp.Body).Decode(&disc))
+	tokenEndpointURL, err := url.Parse(disc.TokenEndpoint)
+	require.NoError(t, err)
+
+	require.NoError(t, appStore.SetStatus(ctx, tenantSlug, clientID, "disabled"))
+
+	resp, err := http.PostForm(server.URL+tokenEndpointURL.Path, url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {clientID},
+	})
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	// zitadel resolves the client before the refresh token, so the disabled
+	// app surfaces as invalid_client (401) from GetClientByClientID; a 5xx
+	// would mean the storage error leaked through as server_error.
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "disabled app must not refresh: %s", string(body))
+	var oauthErr struct {
+		Error string `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(body, &oauthErr))
+	assert.Equal(t, "invalid_client", oauthErr.Error, string(body))
+	assert.NotContains(t, string(body), "access_token")
+
+	// The storage path alone (what oidc-token hits when the client check is
+	// somehow bypassed) also reports invalid_grant.
+	_, err = storage.TokenRequestByRefreshToken(ctx, refreshToken)
+	assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
 }

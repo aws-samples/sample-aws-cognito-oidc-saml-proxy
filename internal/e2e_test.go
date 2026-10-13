@@ -330,7 +330,7 @@ func setupE2E(t *testing.T) *e2eEnv {
 		Claims:      claimStore,
 		Audit:       auditStore,
 	})
-	err = internaloidc.RegisterOIDCRoutes(router, oidcStorage, proxyBaseURL, appStore, sourceStore, auditStore, oidcCryptoKey, hmacKey, nil, false,
+	err = internaloidc.RegisterOIDCRoutes(router, oidcStorage, tenantStore, proxyBaseURL, appStore, sourceStore, auditStore, oidcCryptoKey, hmacKey, nil, false,
 		// Same decode-only verifier as the SAML side: the mock Cognito's unsigned
 		// tokens cannot be JWKS-verified. Production uses the default verifier.
 		internaloidc.WithVerifierFactory(func(_, _ string) cognito.IDTokenVerifier {

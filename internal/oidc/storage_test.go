@@ -241,6 +241,28 @@ func seedOIDCClient(t *testing.T, appStore *store.AppStore, tenantSlug string) s
 	return appID
 }
 
+// TestGetClient_DisabledAppRejected is the M-5 regression: an application whose
+// status is not "active" must not resolve as an OIDC client, so authorize,
+// token and credential checks all fail closed for a disabled app.
+func TestGetClient_DisabledAppRejected(t *testing.T) {
+	s, appStore, _, _ := newTestStorage(t)
+	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
+
+	// Active → resolves.
+	_, err := s.GetClientByClientID(ctx, clientID)
+	require.NoError(t, err)
+
+	require.NoError(t, appStore.SetStatus(ctx, "test-tenant", clientID, "disabled"))
+
+	_, err = s.GetClientByClientID(ctx, clientID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not active")
+
+	// Credential authorization delegates to GetClientByClientID and fails too.
+	assert.Error(t, s.AuthorizeClientIDSecret(ctx, clientID, "irrelevant-secret"))
+}
+
 // TestGetClient_CrossTenantIssuerRejected verifies that a client that
 // belongs to tenant A must not be resolvable on tenant B's issuer path. The
 // zitadel/oidc library resolves clients without a tenant argument, so the

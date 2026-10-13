@@ -37,6 +37,11 @@ API layer, cryptographic signing, and the request-handling code.
   the app's custom login URL / trusted login redirect URIs; IdP-initiated launches never
   persist a session cookie.
 - **AuthnRequest replay detection** on the SAML SSO path.
+- **Tenant and application status enforcement**: tenant status and application status are
+  enforced on every SAML and OIDC protocol endpoint, in both the deployed Lambdas and the
+  monolith. A suspended tenant answers 403 everywhere (its SAML metadata answers 404), and
+  a disabled OIDC application is refused as a client, including for refresh-token grants
+  issued before it was disabled.
 - **CloudFront origin-verify** header (an edge secret in AWS Secrets Manager) ensures the
   API is only reached through the WAF-protected CloudFront front door.
 

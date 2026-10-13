@@ -61,7 +61,7 @@ func newTestRouterWithDeps(t *testing.T) (chi.Router, *Storage, *store.AppStore,
 	require.NoError(t, err)
 
 	r := chi.NewRouter()
-	err = RegisterOIDCRoutes(r, storage, "http://localhost", appStore, sourceStore, nil, cryptoKey, hmacKey, nil, false)
+	err = RegisterOIDCRoutes(r, storage, nil, "http://localhost", appStore, sourceStore, nil, cryptoKey, hmacKey, nil, false)
 	require.NoError(t, err)
 
 	return r, storage, appStore, sourceStore

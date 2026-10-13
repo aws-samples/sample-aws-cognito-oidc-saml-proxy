@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/domain"
+	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/middleware"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/store"
 	"github.com/zitadel/oidc/v3/pkg/op"
 )
@@ -32,7 +33,12 @@ import (
 // Passing hmacKey=nil with skipLoginCallbackRoutes=false is still safe: every
 // sign/verify call returns ErrCookieSigningDisabled so a mis-routed login
 // request fails closed.
-func RegisterOIDCRoutes(r chi.Router, storage *Storage, baseURL string, apps domain.AppReader, sources domain.SourceReader, audit domain.AuditRepository, cryptoKey [32]byte, hmacKey []byte, pendingStore *store.PendingLoginStore, skipLoginCallbackRoutes bool, loginOpts ...LoginHandlerOption) error {
+//
+// tenants backs the tenant status gate (middleware.TenantFromPath) installed on
+// the /t/{tenant}/oidc group so a suspended tenant's discovery, authorize,
+// token and userinfo endpoints all stop serving (M-5). Pass nil only in
+// handler-level tests; a WARN is logged in that case.
+func RegisterOIDCRoutes(r chi.Router, storage *Storage, tenants domain.TenantReader, baseURL string, apps domain.AppReader, sources domain.SourceReader, audit domain.AuditRepository, cryptoKey [32]byte, hmacKey []byte, pendingStore *store.PendingLoginStore, skipLoginCallbackRoutes bool, loginOpts ...LoginHandlerOption) error {
 	config := &op.Config{
 		CryptoKey:                cryptoKey,
 		DefaultLogoutRedirectURI: "/",
@@ -85,6 +91,13 @@ func RegisterOIDCRoutes(r chi.Router, storage *Storage, baseURL string, apps dom
 
 	// Mount the OIDC provider handler under /t/{tenant}/oidc/
 	r.Route("/t/{tenant}/oidc", func(r chi.Router) {
+		// M-5: refuse every OIDC endpoint of a non-active tenant.
+		if tenants != nil {
+			r.Use(middleware.TenantFromPath(tenants))
+		} else {
+			slog.Warn("tenant gate not wired: RegisterOIDCRoutes tenants is nil (test-only wiring)")
+		}
+
 		if !skipLoginCallbackRoutes {
 			// Login and callback handlers MUST be registered before the wildcard
 			// so chi matches them first.

@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -463,6 +464,26 @@ func (s *Storage) TokenRequestByRefreshToken(ctx context.Context, refreshToken s
 		return nil, op.ErrInvalidRefreshToken
 	}
 
+	// M-5: a refresh token outlives the application's status. If the owning
+	// app has been deleted or disabled since the token was issued, refuse the
+	// grant (zitadel surfaces op.ErrInvalidRefreshToken as invalid_grant) and
+	// drop the token so re-enabling the app cannot resurrect it without a
+	// fresh login.
+	_, app, _, err := s.appStore.GetByClientID(ctx, item.ClientID)
+	if err != nil || app.Status != "active" {
+		status := "<unknown>"
+		if app != nil {
+			status = app.Status
+		}
+		slog.Warn("refresh token refused: client not active",
+			"clientId", item.ClientID,
+			"status", status,
+			"error", err,
+		)
+		_ = s.db.Delete(ctx, oidcRefreshTokenPK(refreshToken), oidcRefreshTokenSK())
+		return nil, op.ErrInvalidRefreshToken
+	}
+
 	// Repopulate the in-memory claims cache so the re-issued ID token and
 	// userinfo response carry the same claims as the original login. This
 	// matters across Lambda invocations where the cache starts empty. The cache
@@ -669,6 +690,16 @@ func (s *Storage) GetClientByClientID(ctx context.Context, clientID string) (op.
 
 	if issuerTenant := tenantSlugFromIssuer(op.IssuerFromContext(ctx)); issuerTenant != "" && issuerTenant != tenantSlug {
 		return nil, fmt.Errorf("client %q not found in tenant %q", clientID, issuerTenant)
+	}
+
+	// M-5: a disabled application must not be usable as an OIDC client. This
+	// covers authorize, token (code and refresh grants) and credential checks,
+	// all of which resolve the client through this method. Returned as an
+	// *oidc.Error so the refresh path (which passes storage errors through
+	// unwrapped) answers invalid_client instead of a 500 server_error.
+	if app.Status != "active" {
+		slog.Warn("oidc client refused: application not active", "clientId", clientID, "status", app.Status)
+		return nil, oidc.ErrInvalidClient().WithDescription("client %q is not active", clientID)
 	}
 
 	return NewClient(app, oidcCfg), nil
