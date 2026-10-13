@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,7 +24,92 @@ const (
 	oidcFlowCookieName = "oidc_flow"
 	// oidcFlowCookieMaxAge is the maximum age of the flow cookie (10 minutes).
 	oidcFlowCookieMaxAge = 600
+	// oidcLoginBindingCookieName binds a REPLACE-mode custom-login flow to the
+	// browser that started it (finding M-4). Set when the user is redirected to
+	// the custom login page; must be presented with a FlowID equal to the echoed
+	// `state` on the hand-back to /oidc/login/complete. Without it an attacker
+	// could post their own id_token + a victim's state into the victim's browser
+	// and log the victim in as the attacker (login CSRF / session fixation).
+	//
+	// __Host- prefix: Secure, Path=/, no Domain. SameSite=None: the hand-back is
+	// a cross-site top-level POST from the custom login page, which browsers do
+	// not send Lax cookies on; the signed nonce <-> state comparison is the
+	// security control, not SameSite.
+	oidcLoginBindingCookieName = "__Host-oidc_login"
 )
+
+// oidcLoginBinding is the signed payload of the login-binding cookie.
+type oidcLoginBinding struct {
+	FlowID    string `json:"fid"`
+	CreatedAt int64  `json:"ca"`
+}
+
+var (
+	errLoginBindingMissing  = errors.New("login binding cookie missing")
+	errLoginBindingInvalid  = errors.New("login binding cookie invalid")
+	errLoginBindingMismatch = errors.New("login binding cookie does not match this flow")
+	errLoginBindingExpired  = errors.New("login binding cookie expired")
+)
+
+// setLoginBindingCookie mints the signed __Host-oidc_login cookie for flowID.
+func (h *LoginHandler) setLoginBindingCookie(w http.ResponseWriter, flowID string) error {
+	data, err := json.Marshal(&oidcLoginBinding{FlowID: flowID, CreatedAt: time.Now().Unix()})
+	if err != nil {
+		return err
+	}
+	val, err := h.signedCookie.Encode(data)
+	if err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     oidcLoginBindingCookieName,
+		Value:    val,
+		Path:     "/",
+		MaxAge:   oidcFlowCookieMaxAge,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteNoneMode,
+	})
+	return nil
+}
+
+// verifyLoginBinding checks that the request carries a valid, unexpired
+// __Host-oidc_login cookie minted for flowID.
+func (h *LoginHandler) verifyLoginBinding(r *http.Request, flowID string) error {
+	c, err := r.Cookie(oidcLoginBindingCookieName)
+	if err != nil || c.Value == "" {
+		return errLoginBindingMissing
+	}
+	data, err := h.signedCookie.Decode(c.Value)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errLoginBindingInvalid, err)
+	}
+	var b oidcLoginBinding
+	if err := json.Unmarshal(data, &b); err != nil {
+		return fmt.Errorf("%w: %v", errLoginBindingInvalid, err)
+	}
+	if b.FlowID == "" || b.FlowID != flowID {
+		return errLoginBindingMismatch
+	}
+	if time.Now().Unix()-b.CreatedAt > int64(oidcFlowCookieMaxAge) {
+		return errLoginBindingExpired
+	}
+	return nil
+}
+
+// clearLoginBindingCookie expires the __Host-oidc_login cookie. The attributes
+// must match those used when it was set or the browser will not replace it.
+func clearLoginBindingCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     oidcLoginBindingCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteNoneMode,
+	})
+}
 
 // oidcFlowState is the data persisted in the flow cookie while the user
 // authenticates at Cognito during an OIDC authorization flow.
@@ -170,6 +256,14 @@ func (h *LoginHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		if h.audit != nil {
 			_ = h.audit.LogStep(ctx, tenantSlug, authRequestID, "oidc_custom_login_redirect", clientID, "",
 				map[string]string{"tenant": tenantSlug})
+		}
+		// Bind this flow to the browser we are about to redirect (M-4): the
+		// hand-back to /oidc/login/complete must carry this cookie with the same
+		// flow ID as the echoed `state`.
+		if err := h.setLoginBindingCookie(w, flowID); err != nil {
+			slog.Error("custom login: failed to set login binding cookie", "error", err, "clientID", clientID)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
 		}
 		returnTo := h.baseURL + "/t/" + tenantSlug + "/oidc/login/complete"
 		// Destination is validated above via app.IsTrustedLoginRedirect against
@@ -496,6 +590,18 @@ func (h *LoginHandler) HandleLoginComplete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// M-4: the completion must come from the browser that was redirected to
+	// the custom login page. Verify BEFORE touching the pending login so a
+	// forged post (attacker's id_token + victim's state) neither consumes it
+	// nor completes the AuthRequest; the legitimate browser can still finish.
+	// Bearer is not exempt here: the attack is a browser post and Bearer is
+	// merely an alternative token carrier for the same hand-back.
+	if err := h.verifyLoginBinding(r, flowID); err != nil {
+		slog.Warn("custom login: flow not bound to this browser", "error", err, "tenant", tenantSlug)
+		http.Error(w, "login flow not bound to this browser", http.StatusForbidden)
+		return
+	}
+
 	ctx := r.Context()
 	pl, err := h.pendingStore.Get(ctx, flowID)
 	if err != nil || pl.Protocol != "oidc" {
@@ -508,6 +614,8 @@ func (h *LoginHandler) HandleLoginComplete(w http.ResponseWriter, r *http.Reques
 	}
 	// Single-use.
 	_ = h.pendingStore.Delete(ctx, flowID)
+	// The binding has done its job; drop it so it cannot be replayed.
+	clearLoginBindingCookie(w)
 
 	source, err := h.sources.Get(ctx, pl.TenantSlug, pl.SourceID)
 	if err != nil {

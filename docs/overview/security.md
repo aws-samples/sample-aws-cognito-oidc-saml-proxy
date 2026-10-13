@@ -28,6 +28,14 @@ API layer, cryptographic signing, and the request-handling code.
 - **AWS WAF** with the OWASP Core Rule Set, AWS managed rule groups (Known Bad Inputs, IP
   reputation), and endpoint-specific rate limiting.
 - **CSRF protection** via OAuth2 `state` parameters and PKCE.
+- **Login-binding cookies** for custom login pages: the redirect to the page sets a
+  short-lived, signed `__Host-` cookie tied to the flow's `state`, and the hand-back to
+  `/login/complete` is only accepted from the browser that carries it, so a token cannot
+  be posted into someone else's browser to log them in as the attacker.
+- **Origin allow-list for IdP-initiated SSO**: a browser form post to
+  `/saml/idp-initiate` is only honoured from the gateway's own origin or the origin of
+  the app's custom login URL / trusted login redirect URIs; IdP-initiated launches never
+  persist a session cookie.
 - **AuthnRequest replay detection** on the SAML SSO path.
 - **CloudFront origin-verify** header (an edge secret in AWS Secrets Manager) ensures the
   API is only reached through the WAF-protected CloudFront front door.

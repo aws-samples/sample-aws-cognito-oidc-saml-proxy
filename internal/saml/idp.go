@@ -441,6 +441,18 @@ func (h *TenantIdPHandler) HandleLoginComplete(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// M-4: the completion must come from the browser that was redirected to
+	// the custom login page. Verify BEFORE CompleteCustomLogin so a forged
+	// post (attacker's id_token + victim's state) neither consumes the pending
+	// login nor establishes a session; the legitimate browser can still finish.
+	if err := h.sessionProv.verifyLoginBinding(r, flowID); err != nil {
+		corrID := randomID()
+		slog.Warn("custom login complete: flow not bound to this browser",
+			"error", err, "tenant", tenantSlug, "correlationId", corrID)
+		http.Error(w, "login flow not bound to this browser (ref: "+corrID+")", http.StatusForbidden)
+		return
+	}
+
 	sessCookie, pl, err := h.sessionProv.CompleteCustomLogin(r.Context(), flowID, token)
 	if err != nil {
 		// This endpoint is reachable unauthenticated, so never echo the
@@ -455,6 +467,9 @@ func (h *TenantIdPHandler) HandleLoginComplete(w http.ResponseWriter, r *http.Re
 		http.Error(w, "tenant mismatch", http.StatusBadRequest)
 		return
 	}
+
+	// The binding has done its job; drop it so it cannot be replayed.
+	clearLoginBindingCookie(w)
 
 	// Set the session cookie on the response so subsequent browser requests
 	// carry it, and inject it into this request so the resumed ServeSSO finds
@@ -512,8 +527,10 @@ func (h *TenantIdPHandler) HandleIdPInitiate(w http.ResponseWriter, r *http.Requ
 	}
 
 	token := extractBearerToken(r)
+	tokenFromForm := false
 	if token == "" {
 		token = strings.TrimSpace(r.PostFormValue("id_token"))
+		tokenFromForm = token != ""
 	}
 	if token == "" {
 		http.Error(w, "missing id token", http.StatusBadRequest)
@@ -537,8 +554,8 @@ func (h *TenantIdPHandler) HandleIdPInitiate(w http.ResponseWriter, r *http.Requ
 	// default and must be explicitly enabled on the SP's configuration. The
 	// lookup is scoped to the tenant on the path, so an entityID is only ever
 	// resolved within the tenant that owns it.
-	_, samlCfg, err := h.apps.GetByTenantEntityID(r.Context(), tenantSlug, entityID)
-	if err != nil || samlCfg == nil {
+	app, samlCfg, err := h.apps.GetByTenantEntityID(r.Context(), tenantSlug, entityID)
+	if err != nil || app == nil || samlCfg == nil {
 		http.Error(w, "unknown service provider", http.StatusNotFound)
 		return
 	}
@@ -546,6 +563,25 @@ func (h *TenantIdPHandler) HandleIdPInitiate(w http.ResponseWriter, r *http.Requ
 		slog.Warn("idp-initiated: not enabled for application", "entityID", entityID, "tenant", tenantSlug)
 		http.Error(w, "IdP-initiated SSO is not enabled for this application", http.StatusForbidden)
 		return
+	}
+
+	// M-4: a form-field id_token is a "simple" request any cross-site page can
+	// make a victim's browser send, so it is only accepted from an allow-listed
+	// browser origin — the gateway itself, or the origins of the app's custom
+	// login page / trusted login redirect URIs (where the launcher lives). The
+	// browser sets Origin on cross-site POSTs and cannot be made to forge it; if
+	// Origin is absent (some same-site POSTs) fall back to the Referer's origin.
+	// Authorization: Bearer is exempt: a custom header forces a CORS preflight,
+	// so it cannot be sent cross-site without the gateway opting in.
+	if tokenFromForm {
+		origin := requestOrigin(r)
+		trusted := origin != "" && (origin == gatewayOrigin(h.baseURL) || app.IsTrustedBrowserOrigin(origin))
+		if !trusted {
+			slog.Warn("idp-initiated: request origin not trusted",
+				"origin", origin, "entityID", entityID, "tenant", tenantSlug)
+			http.Error(w, "request origin not trusted for IdP-initiated SSO", http.StatusForbidden)
+			return
+		}
 	}
 
 	sessCookie, err := h.sessionProv.BuildSessionCookieFromToken(r.Context(), tenantSlug, entityID, token)
@@ -558,25 +594,19 @@ func (h *TenantIdPHandler) HandleIdPInitiate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Set the session cookie + inject it so the IdP's GetSession returns the
-	// session immediately (its first check is the cookie) without trying to
-	// resolve an AuthnRequest that does not exist in an IdP-initiated flow.
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    sessCookie,
-		Path:     "/",
-		MaxAge:   cookieMaxAge,
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-	})
 	// Hand the freshly minted, verified session to the resumed ServeIDPInitiated
 	// via the request context (NOT r.AddCookie). GetSession consults the context
 	// before the browser's Cookie header, so a stale/foreign/different-user
 	// saml_session cookie already in the browser cannot shadow this one and make
 	// the IdP assert the wrong identity (findings H-2 / M-1). The binding carried
-	// in the cookie (tenant/source/SP) is re-checked against this request before
-	// the session is trusted.
+	// in the envelope (tenant/source/SP) is re-checked against this request
+	// before the session is trusted.
+	//
+	// Deliberately NO Set-Cookie for saml_session here (M-4): an IdP-initiated
+	// launch is a one-shot assertion for one SP, and a cookie minted from a
+	// posted token would let the poster plant a session in the victim's browser
+	// that later SP-initiated flows would silently reuse. Those flows simply
+	// re-authenticate instead.
 	r = h.sessionProv.requestWithMintedSession(r, sessCookie)
 
 	// IdP-initiated SSO completes synchronously here (ServeIDPInitiated builds
@@ -725,4 +755,36 @@ func handleFederationDiscovery(baseURL string) http.HandlerFunc {
 			)
 		}
 	}
+}
+
+// requestOrigin returns the browser origin ("scheme://host[:port]", lower-cased
+// scheme and host) that issued the request: the Origin header when present and
+// not the opaque "null", otherwise the origin component of the Referer. Returns
+// "" when neither yields a usable origin. Used by the IdP-initiated SSO gate
+// (M-4); the caller treats "" as untrusted.
+func requestOrigin(r *http.Request) string {
+	if o := strings.TrimSpace(r.Header.Get("Origin")); o != "" && o != "null" {
+		return normalizeOrigin(o)
+	}
+	if ref := strings.TrimSpace(r.Header.Get("Referer")); ref != "" {
+		return normalizeOrigin(ref)
+	}
+	return ""
+}
+
+// gatewayOrigin reduces the gateway's configured base URL to its origin so a
+// form post from the gateway's own pages is accepted by the IdP-initiated gate.
+func gatewayOrigin(baseURL string) string {
+	return normalizeOrigin(baseURL)
+}
+
+// normalizeOrigin parses raw as a URL and returns "scheme://host[:port]" with
+// scheme and host lower-cased, or "" when raw has no scheme/host or carries
+// userinfo (a disguised-host trick that must never be treated as an origin).
+func normalizeOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
+		return ""
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
 }

@@ -615,7 +615,7 @@ export default function AppDetailPage() {
                   <Toggle
                     checked={samlAllowIdpInitiated}
                     onChange={({ detail }) => setSamlAllowIdpInitiated(detail.checked)}
-                    description="Allow unsolicited (IdP-initiated) SSO into this app via the gateway's /saml/idp-initiate endpoint. Off by default — IdP-initiated SSO is an opt-in because it can be an abuse vector."
+                    description="Allow unsolicited (IdP-initiated) SSO into this app via the gateway's /saml/idp-initiate endpoint. Off by default — IdP-initiated SSO is an opt-in because it can be an abuse vector. Browser form posts are only accepted from the origin of this app's custom login URL or trusted login redirect URLs, so list the launcher page there."
                   >
                     Allow IdP-initiated SSO
                   </Toggle>
@@ -806,7 +806,10 @@ export default function AppDetailPage() {
                     redirected there. Your page authenticates the user and posts the
                     Cognito ID token back to the gateway's session-establish endpoint
                     (<code>/t/&lt;tenant&gt;/{isSAML ? 'saml' : 'oidc'}/login/complete</code>)
-                    to resume SSO. Leave the URL blank to use the Cognito Hosted UI.
+                    to resume SSO. The hand-back must come from the browser the gateway
+                    redirected (a signed binding cookie set on the redirect is required), and
+                    IdP-initiated launches are only accepted from the origin of a URL listed
+                    below. Leave the URL blank to use the Cognito Hosted UI.
                   </Alert>
 
                   {loginSaveError && (

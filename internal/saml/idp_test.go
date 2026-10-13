@@ -467,6 +467,9 @@ func TestHandleLoginComplete_ErrorDoesNotLeakInternalError(t *testing.T) {
 	form.Set("state", "flow-x")
 	req := httptest.NewRequest(http.MethodPost, "/t/acme/saml/login/complete", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// The browser-binding gate (M-4) runs first; satisfy it so the test reaches
+	// the CompleteCustomLogin error path it is about.
+	req.AddCookie(mintLoginBindingCookie(t, sessionProv, "flow-x"))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

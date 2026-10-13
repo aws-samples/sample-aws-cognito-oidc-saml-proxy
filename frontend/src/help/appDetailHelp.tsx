@@ -65,6 +65,12 @@ export const samlConfigHelp: HelpContent = {
         the gateway's <code>/saml/idp-initiate</code> endpoint (used by an app launcher).
         Disabled by default — it is an opt-in because IdP-initiated SSO can be an abuse vector.
       </p>
+      <p>
+        A browser form post to that endpoint is only accepted from the gateway's own origin or
+        from the origin of this app's custom login URL / trusted login redirect URIs, so the
+        launcher page's origin must be listed there. Requests that send the token in an
+        <code> Authorization: Bearer</code> header are exempt from the origin check.
+      </p>
       <h3>Sessions</h3>
       <dl>
         <dt><strong>Session duration</strong></dt>
@@ -144,6 +150,12 @@ export const customLoginHelp: HelpContent = {
         → your page signs the user in → it POSTs the ID token + <code>state</code> back → the
         gateway verifies the token (its audience must match this app's identity source) and
         resumes the SAML/OIDC flow.
+      </p>
+      <p>
+        The hand-back must come from the same browser the gateway redirected: the redirect sets
+        a short-lived, signed binding cookie tied to <code>state</code>, and a completion
+        without it is rejected. Your page cannot complete a flow it did not start, and the
+        login URL's origin must be in the trusted list for IdP-initiated launches.
       </p>
     </div>
   ),

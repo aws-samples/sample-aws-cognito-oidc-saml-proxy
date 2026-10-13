@@ -137,6 +137,66 @@ func (a *Application) IsTrustedLoginRedirect(candidate string) bool {
 	return false
 }
 
+// IsTrustedBrowserOrigin reports whether origin — the value of a browser's
+// Origin header, "scheme://host[:port]" — is one of the origins this app's
+// custom login page or trusted login redirect targets are served from. It is
+// the anti-CSRF gate for browser form posts to the IdP-initiated SSO endpoint
+// (finding M-4): a cross-site page can make a user's browser POST an id_token,
+// but it cannot forge the Origin header, so only the pages an admin has
+// explicitly allow-listed may launch IdP-initiated SSO from a form.
+//
+// Matching is an exact scheme + host + port comparison (case-insensitive on
+// scheme and host) against the origin component of CustomLoginURL and every
+// TrustedLoginRedirectURIs entry; paths are ignored because Origin never
+// carries one. Anything that is not an https origin, that has a path, query,
+// fragment or userinfo, or that has no host, is rejected. An empty origin or
+// an app with no login-page URLs trusts nothing.
+func (a *Application) IsTrustedBrowserOrigin(origin string) bool {
+	oScheme, oHost, ok := parseOrigin(strings.TrimSpace(origin))
+	if !ok {
+		return false
+	}
+	candidates := make([]string, 0, len(a.TrustedLoginRedirectURIs)+1)
+	if u := strings.TrimSpace(a.CustomLoginURL); u != "" {
+		candidates = append(candidates, u)
+	}
+	candidates = append(candidates, a.TrustedLoginRedirectURIs...)
+	for _, raw := range candidates {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		au, err := url.Parse(raw)
+		if err != nil || au.User != nil || au.Host == "" || !strings.EqualFold(au.Scheme, "https") {
+			continue
+		}
+		if strings.EqualFold(au.Scheme, oScheme) && strings.EqualFold(au.Host, oHost) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseOrigin splits a serialised origin into its scheme and host[:port]. It
+// accepts only the exact "https://host[:port]" shape — no path (a bare "/" is
+// tolerated because some clients serialise it), query, fragment or userinfo.
+func parseOrigin(origin string) (scheme, host string, ok bool) {
+	if origin == "" {
+		return "", "", false
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.User != nil || u.Host == "" || u.Opaque != "" {
+		return "", "", false
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return "", "", false
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", "", false
+	}
+	return u.Scheme, u.Host, true
+}
+
 // pathWithinBoundary reports whether candidate path p is equal to the allowed
 // path a, or extends it at a "/" segment boundary. This prevents
 // "/appfoo" from matching an allow-listed "/app" while still allowing

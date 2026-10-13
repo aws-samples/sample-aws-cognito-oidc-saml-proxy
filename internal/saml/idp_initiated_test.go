@@ -38,7 +38,16 @@ type idpInitiatedEnv struct {
 	verifier    *fakeVerifier
 	entityID    string
 	sessionProv *SessionProvider
+	// trustedOrigin is the browser origin of the app's allow-listed launcher
+	// page (derived from TrustedLoginRedirectURIs); form posts carrying it pass
+	// the M-4 origin gate.
+	trustedOrigin string
 }
+
+// trustedLauncherURI is the allow-listed launcher page every IdP-initiated
+// fixture app carries; its origin is the one browser origin trusted to post an
+// id_token form to /saml/idp-initiate.
+const trustedLauncherURI = "https://launcher.example.com/apps/"
 
 func setupIdPInitiatedEnv(t *testing.T) *idpInitiatedEnv {
 	return setupIdPInitiatedEnvWith(t, true)
@@ -69,6 +78,7 @@ func setupIdPInitiatedEnvWith(t *testing.T, allowIdPInitiated bool) *idpInitiate
 	const entityID = "https://sp.example.com/saml"
 	_, err = appStore.Create(ctx, "acme", &tenant.Application{
 		DisplayName: "SP", Protocol: "saml", SourceID: sourceID, Status: "active",
+		TrustedLoginRedirectURIs: []string{trustedLauncherURI},
 	}, &tenant.SAMLConfig{
 		EntityID:          entityID,
 		AcsURL:            "https://sp.example.com/acs",
@@ -114,7 +124,34 @@ func setupIdPInitiatedEnvWith(t *testing.T, allowIdPInitiated bool) *idpInitiate
 
 	ts := httptest.NewServer(r)
 	t.Cleanup(ts.Close)
-	return &idpInitiatedEnv{server: ts, verifier: verifier, entityID: entityID, sessionProv: sessionProv}
+	return &idpInitiatedEnv{
+		server: ts, verifier: verifier, entityID: entityID, sessionProv: sessionProv,
+		trustedOrigin: "https://launcher.example.com",
+	}
+}
+
+// postIdPInitiateForm POSTs form to /t/acme/saml/idp-initiate as a browser
+// would, with the given Origin header (omitted when origin is ""). Extra
+// headers (e.g. Referer) can be supplied via hdr.
+func postIdPInitiateForm(t *testing.T, env *idpInitiatedEnv, form url.Values, origin string, hdr ...http.Header) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, env.server.URL+"/t/acme/saml/idp-initiate",
+		strings.NewReader(form.Encode()))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	for _, h := range hdr {
+		for k, vs := range h {
+			for _, v := range vs {
+				req.Header.Add(k, v)
+			}
+		}
+	}
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	return resp
 }
 
 func TestIdPInitiated_Success_EmitsSAMLResponse(t *testing.T) {
@@ -125,8 +162,8 @@ func TestIdPInitiated_Success_EmitsSAMLResponse(t *testing.T) {
 	form.Set("entityId", env.entityID)
 	form.Set("relayState", "deep-link-123")
 
-	resp, err := http.PostForm(env.server.URL+"/t/acme/saml/idp-initiate", form)
-	require.NoError(t, err)
+	// A form post from the app's allow-listed launcher origin (M-4).
+	resp := postIdPInitiateForm(t, env, form, env.trustedOrigin)
 	defer func() { _ = resp.Body.Close() }()
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -140,6 +177,82 @@ func TestIdPInitiated_Success_EmitsSAMLResponse(t *testing.T) {
 	// Token was verified against the app's bound source client id.
 	assert.Equal(t, "client-1", env.verifier.gotClientID)
 	assert.Equal(t, "the.id.token", env.verifier.gotToken)
+
+	// M-4: an IdP-initiated launch is a one-shot assertion and must NOT plant a
+	// saml_session cookie in the browser that later SP-initiated flows would
+	// silently reuse.
+	assert.Nil(t, findCookie(resp.Cookies(), sessionCookieName),
+		"idp-initiate must not set a saml_session cookie")
+}
+
+// TestIdPInitiated_UntrustedOrigin_Forbidden is the M-4 regression: a form
+// post of an id_token from a page the app has not allow-listed is a cross-site
+// request forgery and must be rejected before the token is even verified.
+func TestIdPInitiated_UntrustedOrigin_Forbidden(t *testing.T) {
+	env := setupIdPInitiatedEnv(t)
+	form := url.Values{}
+	form.Set("id_token", "the.id.token")
+	form.Set("entityId", env.entityID)
+
+	resp := postIdPInitiateForm(t, env, form, "https://evil.example")
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	assert.Contains(t, string(body), "request origin not trusted")
+	assert.Empty(t, env.verifier.gotToken, "token must not be verified for an untrusted origin")
+}
+
+// TestIdPInitiated_NoOriginOrReferer_Forbidden: a form-field id_token with no
+// way to attribute the request to a browser origin is treated as untrusted.
+func TestIdPInitiated_NoOriginOrReferer_Forbidden(t *testing.T) {
+	env := setupIdPInitiatedEnv(t)
+	form := url.Values{}
+	form.Set("id_token", "the.id.token")
+	form.Set("entityId", env.entityID)
+
+	resp := postIdPInitiateForm(t, env, form, "")
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Empty(t, env.verifier.gotToken)
+}
+
+// TestIdPInitiated_RefererFallback_Accepted: when a browser omits Origin on a
+// same-site form post, the Referer's origin is used instead.
+func TestIdPInitiated_RefererFallback_Accepted(t *testing.T) {
+	env := setupIdPInitiatedEnv(t)
+	form := url.Values{}
+	form.Set("id_token", "the.id.token")
+	form.Set("entityId", env.entityID)
+
+	resp := postIdPInitiateForm(t, env, form, "", http.Header{"Referer": {trustedLauncherURI + "launch?x=1"}})
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// TestIdPInitiated_GatewayOrigin_Accepted: a form post from the gateway's own
+// pages (origin of the configured base URL) is always trusted.
+func TestIdPInitiated_GatewayOrigin_Accepted(t *testing.T) {
+	env := setupIdPInitiatedEnv(t)
+	form := url.Values{}
+	form.Set("id_token", "the.id.token")
+	form.Set("entityId", env.entityID)
+
+	resp := postIdPInitiateForm(t, env, form, "https://idp.example.com")
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// TestIdPInitiated_OriginHostSuffix_Forbidden: the origin match is exact, so a
+// look-alike host that merely starts with the trusted host is rejected.
+func TestIdPInitiated_OriginHostSuffix_Forbidden(t *testing.T) {
+	env := setupIdPInitiatedEnv(t)
+	form := url.Values{}
+	form.Set("id_token", "the.id.token")
+	form.Set("entityId", env.entityID)
+
+	resp := postIdPInitiateForm(t, env, form, "https://launcher.example.com.evil.example")
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
 func TestIdPInitiated_BearerHeaderAccepted(t *testing.T) {
@@ -152,12 +265,17 @@ func TestIdPInitiated_BearerHeaderAccepted(t *testing.T) {
 	// entityId via query so we can use a bodyless bearer request.
 	req.URL.RawQuery = "entityId=" + url.QueryEscape(env.entityID)
 	req.Header.Set("Authorization", "Bearer header.token")
+	// Deliberately no Origin/Referer: a custom Authorization header cannot be
+	// sent by a cross-site form post, so Bearer is exempt from the origin gate.
+	require.Empty(t, req.Header.Get("Origin"))
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "header.token", env.verifier.gotToken)
+	assert.Nil(t, findCookie(resp.Cookies(), sessionCookieName),
+		"idp-initiate must not set a saml_session cookie")
 }
 
 func TestIdPInitiated_MissingToken(t *testing.T) {
@@ -198,8 +316,7 @@ func TestIdPInitiated_InvalidToken(t *testing.T) {
 	form := url.Values{}
 	form.Set("id_token", "bad")
 	form.Set("entityId", env.entityID)
-	resp, err := http.PostForm(env.server.URL+"/t/acme/saml/idp-initiate", form)
-	require.NoError(t, err)
+	resp := postIdPInitiateForm(t, env, form, env.trustedOrigin)
 	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
@@ -257,6 +374,7 @@ func postIdPInitiateWithCookie(t *testing.T, env *idpInitiatedEnv, cookieValue s
 		strings.NewReader(form.Encode()))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", env.trustedOrigin)
 	if cookieValue != "" {
 		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cookieValue})
 	}

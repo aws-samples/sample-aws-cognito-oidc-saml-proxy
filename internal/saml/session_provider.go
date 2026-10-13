@@ -32,7 +32,96 @@ const (
 	flowCookieName = "saml_flow"
 	// cookieMaxAge controls how long the flow cookie is valid (10 minutes).
 	cookieMaxAge = 600
+	// loginBindingCookieName binds a REPLACE-mode custom-login flow to the
+	// browser that started it (finding M-4). It is set when the user is
+	// redirected to the custom login page and must be presented, with a FlowID
+	// equal to the echoed `state`, on the hand-back to /saml/login/complete.
+	// Without it an attacker could post their own id_token + a victim's state
+	// into the victim's browser (login CSRF / session fixation).
+	//
+	// __Host- prefix: Secure, Path=/, no Domain — the cookie is scoped to this
+	// exact origin and cannot be planted from a sibling subdomain.
+	// SameSite=None: the hand-back is a cross-site top-level POST from the
+	// custom login page; browsers do not send Lax cookies on those, so Lax would
+	// break every custom login page on another site. Security comes from the
+	// signed nonce <-> state comparison, not from SameSite.
+	loginBindingCookieName = "__Host-saml_login"
 )
+
+// loginBinding is the signed payload of the login-binding cookie.
+type loginBinding struct {
+	FlowID    string `json:"fid"`
+	CreatedAt int64  `json:"ca"`
+}
+
+// errLoginBindingMissing and friends are the verifyLoginBinding failure modes.
+var (
+	errLoginBindingMissing  = errors.New("login binding cookie missing")
+	errLoginBindingInvalid  = errors.New("login binding cookie invalid")
+	errLoginBindingMismatch = errors.New("login binding cookie does not match this flow")
+	errLoginBindingExpired  = errors.New("login binding cookie expired")
+)
+
+// setLoginBindingCookie mints the signed __Host-saml_login cookie for flowID.
+func (sp *SessionProvider) setLoginBindingCookie(w http.ResponseWriter, flowID string) error {
+	data, err := json.Marshal(&loginBinding{FlowID: flowID, CreatedAt: time.Now().Unix()})
+	if err != nil {
+		return err
+	}
+	val, err := sp.signedCookie.Encode(data)
+	if err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     loginBindingCookieName,
+		Value:    val,
+		Path:     "/",
+		MaxAge:   cookieMaxAge,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteNoneMode,
+	})
+	return nil
+}
+
+// verifyLoginBinding checks that the request carries a valid, unexpired
+// __Host-saml_login cookie minted for flowID. Any failure means the completion
+// did not come from the browser that started the flow.
+func (sp *SessionProvider) verifyLoginBinding(r *http.Request, flowID string) error {
+	c, err := r.Cookie(loginBindingCookieName)
+	if err != nil || c.Value == "" {
+		return errLoginBindingMissing
+	}
+	data, err := sp.signedCookie.Decode(c.Value)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errLoginBindingInvalid, err)
+	}
+	var b loginBinding
+	if err := json.Unmarshal(data, &b); err != nil {
+		return fmt.Errorf("%w: %v", errLoginBindingInvalid, err)
+	}
+	if b.FlowID == "" || b.FlowID != flowID {
+		return errLoginBindingMismatch
+	}
+	if time.Now().Unix()-b.CreatedAt > int64(cookieMaxAge) {
+		return errLoginBindingExpired
+	}
+	return nil
+}
+
+// clearLoginBindingCookie expires the __Host-saml_login cookie. The attributes
+// must match those used when it was set or the browser will not replace it.
+func clearLoginBindingCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     loginBindingCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteNoneMode,
+	})
+}
 
 // flowState is the data persisted in the flow cookie while the user
 // authenticates at Cognito.
@@ -927,6 +1016,15 @@ func (sp *SessionProvider) tryCustomLoginRedirect(w http.ResponseWriter, r *http
 	if sp.auditStore != nil && req.Request.ID != "" {
 		_ = sp.auditStore.LogStep(r.Context(), tenantSlug, req.Request.ID, "sso_custom_login_redirect", entityID, "",
 			map[string]string{"tenant": tenantSlug})
+	}
+
+	// Bind this flow to the browser we are about to redirect (M-4): the
+	// hand-back to /saml/login/complete must carry this cookie with the same
+	// flow ID as the echoed `state`.
+	if err := sp.setLoginBindingCookie(w, flowID); err != nil {
+		slog.Error("custom login: failed to set login binding cookie", "error", err, "entityID", entityID)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return true
 	}
 
 	returnTo := sp.baseURL + "/t/" + tenantSlug + "/saml/login/complete"

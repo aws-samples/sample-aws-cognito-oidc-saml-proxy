@@ -22,6 +22,53 @@ func TestApplication_HasCustomLogin(t *testing.T) {
 	}
 }
 
+// TestApplication_IsTrustedBrowserOrigin covers the M-4 origin allow-list used
+// to gate browser form posts to the IdP-initiated SSO endpoint.
+func TestApplication_IsTrustedBrowserOrigin(t *testing.T) {
+	app := &Application{
+		CustomLoginURL:           "https://login.example.com/start",
+		TrustedLoginRedirectURIs: []string{"https://login.example.com/", "https://launcher.corp.example:8443/apps/"},
+	}
+
+	cases := []struct {
+		name   string
+		app    *Application
+		origin string
+		want   bool
+	}{
+		{"custom login origin", app, "https://login.example.com", true},
+		{"custom login origin trailing slash", app, "https://login.example.com/", true},
+		{"trusted redirect origin with port", app, "https://launcher.corp.example:8443", true},
+		{"case-insensitive host", app, "https://LOGIN.EXAMPLE.COM", true},
+		{"case-insensitive scheme", app, "HTTPS://login.example.com", true},
+		{"surrounding whitespace", app, "  https://login.example.com  ", true},
+
+		{"different host", app, "https://evil.example", false},
+		{"host suffix confusion", app, "https://login.example.com.evil.example", false},
+		{"port mismatch", app, "https://launcher.corp.example", false},
+		{"port mismatch explicit", app, "https://login.example.com:8443", false},
+		{"http scheme", app, "http://login.example.com", false},
+		{"userinfo", app, "https://login.example.com@evil.example", false},
+		{"origin with path", app, "https://login.example.com/start", false},
+		{"origin with query", app, "https://login.example.com?x=1", false},
+		{"null origin", app, "null", false},
+		{"empty origin", app, "", false},
+		{"not a url", app, "://nope", false},
+
+		{"no login urls configured", &Application{}, "https://login.example.com", false},
+		{"only custom login url", &Application{CustomLoginURL: "https://only.example/x"}, "https://only.example", true},
+		{"http allow-list entry ignored", &Application{TrustedLoginRedirectURIs: []string{"http://plain.example/"}}, "http://plain.example", false},
+		{"userinfo allow-list entry ignored", &Application{TrustedLoginRedirectURIs: []string{"https://[email protected]/"}}, "https://evil.example", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.app.IsTrustedBrowserOrigin(tc.origin); got != tc.want {
+				t.Fatalf("IsTrustedBrowserOrigin(%q)=%v want %v", tc.origin, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestApplication_IsTrustedLoginRedirect(t *testing.T) {
 	allow := []string{"https://login.example.com/", "https://auth.corp.example/sso"}
 
