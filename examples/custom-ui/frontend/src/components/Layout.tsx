@@ -5,11 +5,22 @@ interface LayoutProps {
   authed: boolean;
   username: string | null;
   children: ReactNode;
+  // When true, omit the left nav and render children full-bleed (used by the
+  // split-screen /login page).
+  fullBleed?: boolean;
 }
 
 const linkClass = ({ isActive }: { isActive: boolean }) => (isActive ? 'active' : '');
 
-export default function Layout({ authed, username, children }: LayoutProps) {
+export default function Layout({ authed, username, children, fullBleed = false }: LayoutProps) {
+  if (fullBleed) {
+    return (
+      <div className="app full-bleed">
+        <main className="main">{children}</main>
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <nav className="nav">
