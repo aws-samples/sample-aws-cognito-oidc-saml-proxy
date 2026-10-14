@@ -1,0 +1,5 @@
+[
+  { "slug": "demo", "displayName": "Demo Tenant" },
+  { "slug": "acme-corp", "displayName": "Acme Corp" },
+  { "slug": "partner-co", "displayName": "Partner Co" }
+]

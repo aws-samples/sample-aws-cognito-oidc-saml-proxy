@@ -1,0 +1,13 @@
+{
+  "gateway": {
+    "entityId": "https://gateway.example.com/saml/metadata",
+    "baseUrl": "https://gateway.example.com",
+    "kmsKeyId": "arn:aws:kms:us-east-1:111111111111:key/00000000-0000-0000-0000-000000000000",
+    "samlMetadataUrl": "https://gateway.example.com/t/demo/saml/metadata",
+    "oidcDiscoveryUrl": "https://gateway.example.com/t/demo/oidc/.well-known/openid-configuration"
+  },
+  "tenant": {
+    "slug": "demo",
+    "displayName": "Demo Tenant"
+  }
+}
