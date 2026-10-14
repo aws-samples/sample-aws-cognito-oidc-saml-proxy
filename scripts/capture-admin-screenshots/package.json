@@ -1,0 +1,14 @@
+{
+  "name": "capture-admin-screenshots",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dev-only Playwright harness that drives the admin SPA with a fake Cognito session and mocked management API to produce annotated tour screenshots. No live AWS; no product-code change.",
+  "license": "MIT-0",
+  "scripts": {
+    "capture": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "sharp": "^0.33.5"
+  }
+}

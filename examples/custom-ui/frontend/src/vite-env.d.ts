@@ -6,6 +6,9 @@ interface ImportMetaEnv {
   readonly VITE_COGNITO_REGION?: string;
   readonly VITE_GATEWAY_BASE_URL?: string;
   readonly VITE_GATEWAY_TENANT?: string;
+  readonly VITE_COGNITO_DOMAIN?: string;
+  readonly VITE_SOCIAL_IDPS?: string;
+  readonly VITE_PASSKEYS_ENABLED?: string;
 }
 
 interface ImportMeta {

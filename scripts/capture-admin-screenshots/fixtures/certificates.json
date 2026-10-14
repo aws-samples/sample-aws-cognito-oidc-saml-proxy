@@ -1,0 +1,18 @@
+{
+  "certificates": [
+    {
+      "id": "cert-primary",
+      "status": "active",
+      "daysRemaining": 412,
+      "isExpired": false,
+      "notAfter": "2026-06-01T00:00:00Z"
+    },
+    {
+      "id": "cert-backup",
+      "status": "backup",
+      "daysRemaining": 760,
+      "isExpired": false,
+      "notAfter": "2027-10-01T00:00:00Z"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "events": [
+    { "flowId": "flow-0001", "stepType": "saml_sso_success", "userId": "alex@example.com", "spEntityId": "https://saml.salesforce.example.com", "timestamp": "2024-04-01T09:15:00Z" },
+    { "flowId": "flow-0002", "stepType": "oidc_token_issued", "userId": "jordan@example.com", "spEntityId": "https://portal.example.com", "timestamp": "2024-04-01T09:10:00Z" },
+    { "flowId": "flow-0003", "stepType": "saml_sso_success", "userId": "sam@example.com", "spEntityId": "https://saml.salesforce.example.com", "timestamp": "2024-04-01T08:58:00Z" },
+    { "flowId": "flow-0004", "stepType": "oidc_authorize", "userId": "pat@example.com", "spEntityId": "https://portal.example.com", "timestamp": "2024-04-01T08:40:00Z" },
+    { "flowId": "flow-0005", "stepType": "saml_sso_error", "userId": "lee@example.com", "spEntityId": "https://saml.salesforce.example.com", "timestamp": "2024-04-01T08:22:00Z" },
+    { "flowId": "flow-0006", "stepType": "oidc_token_issued", "userId": "robin@example.com", "spEntityId": "https://portal.example.com", "timestamp": "2024-04-01T08:05:00Z" },
+    { "flowId": "flow-0007", "stepType": "saml_sso_success", "userId": "casey@example.com", "spEntityId": "https://saml.salesforce.example.com", "timestamp": "2024-04-01T07:51:00Z" },
+    { "flowId": "flow-0008", "stepType": "oidc_authorize", "userId": "morgan@example.com", "spEntityId": "https://portal.example.com", "timestamp": "2024-04-01T07:33:00Z" },
+    { "flowId": "flow-0009", "stepType": "saml_sso_success", "userId": "taylor@example.com", "spEntityId": "https://saml.salesforce.example.com", "timestamp": "2024-04-01T07:12:00Z" },
+    { "flowId": "flow-0010", "stepType": "oidc_token_issued", "userId": "jamie@example.com", "spEntityId": "https://portal.example.com", "timestamp": "2024-04-01T06:59:00Z" }
+  ]
+}

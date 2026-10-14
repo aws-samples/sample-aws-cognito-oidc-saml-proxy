@@ -1,0 +1,42 @@
+[
+  {
+    "id": "app-salesforce",
+    "displayName": "Salesforce (SAML)",
+    "protocol": "saml",
+    "sourceId": "src-corp-okta",
+    "status": "active",
+    "createdAt": "2024-01-10T10:00:00Z",
+    "updatedAt": "2024-02-02T10:00:00Z",
+    "saml": {
+      "entityId": "https://saml.salesforce.example.com",
+      "acsUrl": "https://saml.salesforce.example.com/acs",
+      "nameIdFormat": "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+      "nameIdSource": "email",
+      "signResponse": true,
+      "signAssertion": true,
+      "encryptAssertion": false,
+      "allowIdpInitiated": false,
+      "sessionDurationSec": 3600,
+      "clockSkewSec": 60
+    }
+  },
+  {
+    "id": "app-internal-spa",
+    "displayName": "Internal Portal (OIDC)",
+    "protocol": "oidc",
+    "sourceId": "src-corp-okta",
+    "status": "active",
+    "createdAt": "2024-02-14T10:00:00Z",
+    "updatedAt": "2024-03-01T10:00:00Z",
+    "oidc": {
+      "redirectURIs": ["https://portal.example.com/callback"],
+      "postLogoutRedirectURIs": ["https://portal.example.com/"],
+      "grantTypes": ["authorization_code"],
+      "responseTypes": ["code"],
+      "scopes": ["openid", "email", "profile"],
+      "tokenEndpointAuthMethod": "none",
+      "idTokenLifetimeSec": 3600,
+      "accessTokenLifetimeSec": 3600
+    }
+  }
+]

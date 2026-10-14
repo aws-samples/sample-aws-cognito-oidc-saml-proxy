@@ -25,8 +25,9 @@ function ProtectedRoute({ children }: { children: ReactNode }) {
 
 function Shell() {
   const { authed, username } = useAuth();
+  const fullBleed = useLocation().pathname === '/login';
   return (
-    <Layout authed={!!authed} username={username}>
+    <Layout authed={!!authed} username={username} fullBleed={fullBleed}>
       <Routes>
         <Route path="/" element={<ProtectedRoute><HomePage /></ProtectedRoute>} />
         <Route path="/login" element={<LoginPage />} />
