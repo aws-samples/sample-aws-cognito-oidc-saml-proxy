@@ -62,6 +62,49 @@ cp .env.example .env.local      # fill in your pool/client/region
 npm install && npm run dev      # http://localhost:5174
 ```
 
+## Optional: social login and passkeys on the login page
+
+The `/login` page can show **social / external IdP buttons** and a **WebAuthn
+passkey button** in addition to the SRP email/password form. Both are **hidden /
+off by default** — the page stays a plain email/password form until you configure
+them. They are driven entirely by config (no rebuild in a deployed environment):
+the values flow through the runtime `/config.json` or, for local `npm run dev`,
+the `VITE_*` env vars. The demo-stack `local.config` does **not** need to carry
+them; this is operator-driven and optional.
+
+| Config field (`/config.json`) | Local env var | Effect |
+|---|---|---|
+| `cognitoDomain` | `VITE_COGNITO_DOMAIN` | Cognito user-pool domain used to build the `/oauth2/authorize` social-login URLs. Required for the social section to appear. |
+| `socialIdps` | `VITE_SOCIAL_IDPS` | JSON array of `{ "label", "idp", "color"? }`. `idp` is the exact Cognito identity-provider name. Social buttons show only when this is non-empty **and** `cognitoDomain` is set. |
+| `passkeysEnabled` | `VITE_PASSKEYS_ENABLED` | `true` shows the passkey button. The button is still disabled when the browser lacks WebAuthn support. |
+
+**Social buttons** perform a real top-level redirect to
+`https://{cognitoDomain}/oauth2/authorize?identity_provider={idp}&response_type=code&client_id={clientId}&redirect_uri={origin}/login&scope=openid+email+profile`.
+For this to work the operator must:
+
+- create the matching identity providers in the Cognito user pool (e.g. Google,
+  Sign in with Apple, or a custom SAML/OIDC provider),
+- enable those providers on the app client (the gateway stack exposes
+  `spa_additional_identity_providers` for the SPA client — see
+  `infra/gateway/variables.tf`), and
+- register `{origin}/login` (e.g. `https://your-demo-host/login`) as a callback
+  URL on the app client.
+
+**Passkeys** run the real Cognito selection-based `USER_AUTH` → `WEB_AUTHN` flow
+(`InitiateAuth` → `navigator.credentials.get()` → `RespondToAuthChallenge`). The
+demo pool must be on the **Essentials tier or higher** (WebAuthn is not available
+on the Lite tier), and the user is assumed to have a **pre-registered passkey** —
+passkey **enrollment** is out of scope for this demo. Enter the user's email in
+the Email field first, then click **Sign in with a passkey**.
+
+Example `.env.local` snippet:
+
+```bash
+VITE_COGNITO_DOMAIN=example.auth.us-east-1.amazoncognito.com
+VITE_SOCIAL_IDPS=[{"label":"Google","idp":"Google","color":"#4285f4"},{"label":"Apple","idp":"SignInWithApple"}]
+VITE_PASSKEYS_ENABLED=true
+```
+
 ## Deploy (AWS)
 
 ```bash
