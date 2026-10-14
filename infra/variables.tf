@@ -177,6 +177,21 @@ variable "enable_backup_signing_key" {
   default     = true
 }
 
+variable "spa_additional_identity_providers" {
+  description = <<-EOT
+    Extra Cognito identity-provider names to enable on the SPA (admin console)
+    app client, in addition to the always-present "COGNITO" provider. Lets the
+    SPA client offer social / external IdP sign-in (e.g. "Google",
+    "SignInWithApple", or a custom SAML/OIDC provider) once those providers exist
+    in the user pool. Empty by default so the SPA client keeps COGNITO-only
+    behaviour and no app-client diff is produced on a fresh plan. The matching
+    aws_cognito_identity_provider resources are out of scope here and must be
+    created separately before adding a name to this list.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
 variable "tenant_account_ids" {
   description = <<-EOT
     Allow-list of onboarded customer AWS account IDs the management-api Lambda may
