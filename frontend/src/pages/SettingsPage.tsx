@@ -276,7 +276,7 @@ export default function SettingsPage() {
 
                       <FormField
                         label="Sign Response"
-                        description="Sign the SAML response by default"
+                        description="Pre-fills the wizard; the gateway always signs the SAML response."
                       >
                         <Toggle
                           checked={signResponse}
@@ -288,7 +288,7 @@ export default function SettingsPage() {
 
                       <FormField
                         label="Sign Assertion"
-                        description="Sign the SAML assertion by default"
+                        description="Pre-fills the wizard; the gateway always signs the SAML assertion."
                       >
                         <Toggle
                           checked={signAssertion}

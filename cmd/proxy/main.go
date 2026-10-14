@@ -18,8 +18,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
-	"github.com/aws/aws-sdk-go-v2/service/kms"
-	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	chiadapter "github.com/awslabs/aws-lambda-go-api-proxy/chi"
 	"github.com/go-chi/chi/v5"
@@ -165,30 +163,32 @@ func main() {
 	// Convert certificate to PEM format for API responses
 	certPEM := crypto.CertToPEM(cert)
 
-	// Derive cookie encryption key from KMS (defense-in-depth: key never stored at rest).
-	// In production, uses KMS GenerateDataKey so the key material is protected by the HSM.
-	// In local dev, falls back to random bytes.
+	// Shared cookie root key (M-3). A deployed monolith may run as several
+	// instances, so the key must come from Secrets Manager whenever an ARN is
+	// configured. Only local dev — a single process with in-memory stores — may
+	// fall back to a per-process random key; a deployed monolith without the ARN
+	// refuses to start rather than mint cookies no other instance can read.
 	var hmacKey []byte
-	if !cfg.Environment.IsLocal() && cfg.KMSEncryptionKeyID != "" {
-		kmsClient := kms.NewFromConfig(awsCfg)
-		encKeyID := cfg.KMSEncryptionKeyID
-		dataKeyOut, err := kmsClient.GenerateDataKey(context.Background(), &kms.GenerateDataKeyInput{
-			KeyId:   &encKeyID,
-			KeySpec: kmstypes.DataKeySpecAes256,
-		})
-		if err != nil {
-			slog.Error("failed to generate data key from KMS", "error", err)
+	switch {
+	case cfg.CookieKeySecretARN != "":
+		smClient := secretsmanager.NewFromConfig(awsCfg)
+		var smErr error
+		hmacKey, smErr = crypto.FetchCookieKey(context.Background(), smClient, cfg.CookieKeySecretARN)
+		if smErr != nil {
+			slog.Error("failed to fetch cookie key from Secrets Manager", "error", smErr)
 			os.Exit(1)
 		}
-		hmacKey = dataKeyOut.Plaintext
-		slog.Info("cookie encryption key derived from KMS", "keyId", cfg.KMSEncryptionKeyID)
-	} else {
+		slog.Info("cookie key loaded from Secrets Manager")
+	case cfg.Environment.IsLocal():
 		hmacKey = make([]byte, 32)
 		if _, err := rand.Read(hmacKey); err != nil {
-			slog.Error("failed to generate random HMAC key", "error", err)
+			slog.Error("failed to generate random cookie key", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("cookie encryption key generated from random (local dev)")
+		slog.Info("cookie key generated per-process (local dev); set PROXY_COOKIE_KEY_SECRET_ARN to share a key across instances")
+	default:
+		slog.Error("PROXY_COOKIE_KEY_SECRET_ARN is required outside local dev: a per-process cookie key is not readable by other instances")
+		os.Exit(1)
 	}
 
 	// Create SAML components
@@ -261,8 +261,6 @@ func main() {
 		BaseURL:          cfg.BaseURL,
 		EntityID:         cfg.EntityID,
 		KMSKeyID:         cfg.KMSKeyID,
-		AWSRegion:        cfg.AWSRegion,
-		SaaSAccountID:    cfg.SaaSAccountID,
 		Environment:      cfg.Environment,
 		Verifier:         apiVerifier,
 		VerifierClientID: cfg.CognitoClientID,
@@ -288,7 +286,10 @@ func main() {
 	sessionProvider.SetPendingLoginStore(pendingLoginStore)
 
 	// Register tenant-scoped SAML routes: /t/{tenant}/saml/*
-	// The tenant middleware is already applied by the router for /t/* routes
+	// RegisterTenantRoutes (and RegisterOIDCRoutes below) install
+	// middleware.TenantFromPath on their own /t/{tenant} route groups, so the
+	// tenant status gate (M-5) is enforced here exactly as in the Lambdas.
+	// api.NewRouter only gates /api/v1/* via TenantFromJWTForAPI.
 	saml.RegisterTenantRoutes(router, saml.TenantRoutesConfig{
 		Handler:     tenantIdPHandler,
 		SessionProv: sessionProvider,
@@ -333,7 +334,7 @@ func main() {
 			slog.Info("OIDC crypto key generated randomly (local dev — set PROXY_OIDC_CRYPTO_KEY_SECRET_ARN for persistence)")
 		}
 
-		if err := proxyoidc.RegisterOIDCRoutes(router, oidcStorage, cfg.BaseURL, appStore, sourceStore, auditLogger, oidcCryptoKey, hmacKey, pendingLoginStore, false); err != nil {
+		if err := proxyoidc.RegisterOIDCRoutes(router, oidcStorage, tenantStore, cfg.BaseURL, appStore, sourceStore, auditLogger, oidcCryptoKey, hmacKey, pendingLoginStore, false); err != nil {
 			slog.Error("failed to register OIDC routes", "error", err)
 			os.Exit(1)
 		}

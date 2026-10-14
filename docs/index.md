@@ -23,7 +23,7 @@ Read more in [Introduction](overview/introduction.md).
   [Details →](protocols/saml.md)
 - **OIDC 1.0 Provider** — multi-tenant issuers, introspection, per-app claim mapping, RS256
   signing. [Details →](protocols/oidc.md)
-- **Multi-tenant** — isolated issuers, per-tenant KMS signing keys, cross-pool federation.
+- **Multi-tenant** — isolated issuers, a single gateway signing key (KMS) with an optional backup key for rotation, cross-pool federation.
 - **Admin console** — a React SPA to manage tenants, sources, apps, and mappings.
   [Guide →](guides/admin-console.md)
 - **Serverless & low-cost** — Lambda + CloudFront + WAF, ~$28–35/mo idle.

@@ -626,9 +626,11 @@ func seedSAMLApp(t *testing.T, sourceStore *store.SourceStore, appStore *store.A
 		Status:      "active",
 	}
 	samlCfg := &tenant.SAMLConfig{
-		EntityID: entityID,
-		AcsURL:   "https://sp.example.com/saml/acs",
-		AcsURLs:  []string{"https://sp.example.com/saml/acs"},
+		EntityID:     entityID,
+		AcsURL:       "https://sp.example.com/saml/acs",
+		AcsURLs:      []string{"https://sp.example.com/saml/acs"},
+		NameIDFormat: tenant.NameIDFormatEmail,
+		NameIDSource: "email",
 	}
 	_, err = appStore.Create(context.Background(), "acme", app, samlCfg)
 	require.NoError(t, err)
@@ -677,6 +679,7 @@ func TestSessionProvider_GetSession_ValidIDToken_IssuesSessionWithoutRedirect(t 
 	fake := &fakeVerifier{claims: map[string]interface{}{
 		"sub":            "user-123",
 		"email":          "user@example.com",
+		"email_verified": true,
 		"given_name":     "Test",
 		"family_name":    "User",
 		"cognito:groups": []interface{}{"admins", "users"},
@@ -700,6 +703,7 @@ func TestSessionProvider_GetSession_ValidIDToken_IssuesSessionWithoutRedirect(t 
 	require.NotNil(t, session, "valid ID token should yield a session")
 	assert.Equal(t, "user@example.com", session.UserEmail)
 	assert.Equal(t, "user@example.com", session.NameID)
+	assert.Equal(t, tenant.NameIDFormatEmail, session.NameIDFormat)
 	assert.Equal(t, "user-123", session.SubjectID)
 	assert.Equal(t, "Test", session.UserGivenName)
 	assert.ElementsMatch(t, []string{"admins", "users"}, session.Groups)

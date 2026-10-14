@@ -330,7 +330,7 @@ func setupE2E(t *testing.T) *e2eEnv {
 		Claims:      claimStore,
 		Audit:       auditStore,
 	})
-	err = internaloidc.RegisterOIDCRoutes(router, oidcStorage, proxyBaseURL, appStore, sourceStore, auditStore, oidcCryptoKey, hmacKey, nil, false,
+	err = internaloidc.RegisterOIDCRoutes(router, oidcStorage, tenantStore, proxyBaseURL, appStore, sourceStore, auditStore, oidcCryptoKey, hmacKey, nil, false,
 		// Same decode-only verifier as the SAML side: the mock Cognito's unsigned
 		// tokens cannot be JWKS-verified. Production uses the default verifier.
 		internaloidc.WithVerifierFactory(func(_, _ string) cognito.IDTokenVerifier {
@@ -771,6 +771,19 @@ func TestE2E_SAML_AttributeMapping(t *testing.T) {
 	if v, ok := attrs["custom:dept"]; ok {
 		assert.Contains(t, v, "Engineering")
 	}
+
+	// M-7: ONLY mapped attributes are released. The mock token carries
+	// custom:department and cognito:groups, and crewjam's default maker would
+	// emit eduPersonAffiliation/subject-id/uid — none of these are mapped, so
+	// none may appear.
+	assert.NotContains(t, attrs, "custom:department", "unmapped custom attribute must not be released")
+	assert.NotContains(t, attrs, "department", "unmapped custom attribute must not be released")
+	assert.NotContains(t, attrs, "custom:tenant_id", "unmapped custom attribute must not be released")
+	assert.NotContains(t, attrs, "urn:oid:1.3.6.1.4.1.5923.1.1.1.1", "eduPersonAffiliation default must not be released")
+	assert.NotContains(t, attrs, "urn:oasis:names:tc:SAML:attribute:subject-id", "subject-id default must not be released")
+	assert.NotContains(t, attrs, "urn:oid:0.9.2342.19200300.100.1.1", "uid default must not be released")
+	assert.NotContains(t, attrs, "urn:oid:1.3.6.1.4.1.5923.1.1.1.6", "eduPersonPrincipalName default must not be released")
+	assert.Len(t, attrs, 5, "exactly the five mapped attributes are released")
 }
 
 // ===========================================================================

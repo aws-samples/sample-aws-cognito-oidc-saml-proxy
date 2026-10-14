@@ -32,13 +32,65 @@ sequenceDiagram
 | Declarative per-app claim mappings (config, not Lambda code) | Pre-token-generation Lambda trigger |
 | Token introspection endpoint ([RFC 7662](https://datatracker.ietf.org/doc/html/rfc7662)) | — |
 | Cross-pool federation (one gateway, multiple Cognito pools) | One pool per app client set |
-| Per-tenant KMS signing keys | AWS-managed pool signing keys |
+| Single gateway signing key (KMS) with an optional backup key for rotation | AWS-managed pool signing keys |
 | Unified SAML + OIDC management API and UI | Separate console/API per protocol |
 | Raw `cognito:groups` passed as `groups` claim | Same (`cognito:groups` in ID token) |
 
 Both the gateway and Amazon Cognito support: PKCE (S256), public and confidential clients,
 per-app redirect URI validation, configurable token lifetimes, RS256 signing, discovery,
 JWKS, UserInfo, and token revocation.
+
+## Claims
+
+The gateway captures the claims from the verified Cognito ID token at login and persists
+them with the authorization request, the refresh token and the access token. The ID token,
+the UserInfo response and token introspection are all built from those stored records, so
+the result is identical whether the endpoints run in one process or on separate Lambda
+functions.
+
+| Claim | Scope | ID token | UserInfo | Source |
+|---|---|---|---|---|
+| `sub` | `openid` | yes | yes | Cognito `sub` |
+| `email` | `email` | yes | yes | Cognito `email`. **Omitted** when Cognito provides none; the gateway never substitutes the subject or any other value for it. |
+| `email_verified` | `email` | yes | yes | Cognito `email_verified` verbatim; `false` when the claim is absent or the address is missing. |
+| `given_name`, `family_name`, `name` | `profile` | yes | yes | Cognito `given_name` / `family_name`; `name` is emitted only when both are present. |
+| `preferred_username` | `profile` | yes | yes | The Cognito email; omitted when there is none. |
+| `groups` | — | yes | yes | Raw `cognito:groups`, emitted whenever the user has any. |
+| per-app mapped claims | — | yes | yes | The application's claim and role mappings (see below). |
+
+### Per-app claim mappings
+
+The claim mappings configured for an OIDC application (Mappings tab, or
+`/api/v1/applications/{id}/claim-mappings` and `/role-mappings`) are applied to the ID
+token **and** the UserInfo response,
+the same way the SAML assertion maker applies them to SAML attributes:
+
+- `cognito` / `attribute` mappings resolve a Cognito field (`email`, `given_name`,
+  `family_name`, `name`, `sub`, `username`) or a custom attribute (with or without the
+  `custom:` prefix) and emit it under the target name; `defaultValue` fills in when the
+  source is empty.
+- `groupMapping` mappings emit, as a string array, the role values mapped from the user's
+  Cognito groups.
+- `static` mappings emit their `defaultValue`.
+
+A mapping whose target is a standard or reserved claim name (`sub`, `iss`, `aud`, `exp`,
+`iat`, `nbf`, `nonce`, `at_hash`, `c_hash`, `azp`, `auth_time`, `amr`, `acr`, `email`,
+`email_verified`, `name`, `given_name`, `family_name`, `preferred_username`) is ignored and
+logged; mapped values can never overwrite the identity claims above.
+
+## Token lifetimes
+
+Per-application lifetimes are set through the management API (`oidc.idTokenLifetimeSec`,
+`oidc.accessTokenLifetimeSec`, `oidc.refreshTokenLifetimeSec`) and the admin console.
+
+| Field | Honoured as | Bounds | Default (`0`) | Out of range |
+|-------|-------------|--------|---------------|--------------|
+| `idTokenLifetimeSec` | ID token `exp` | 60–86400 s | 3600 s | 422 on create/update |
+| `accessTokenLifetimeSec` | Access token expiry (also enforced by UserInfo and introspection) | 60–86400 s | 3600 s | 422 on create/update |
+| `refreshTokenLifetimeSec` | Refresh token expiry (refresh_token grant + `offline_access`) | — | 30 days | — |
+
+Stored records outside the bounds (for example written before the bounds existed) are
+clamped on the token path rather than honoured verbatim.
 
 ## Endpoints (per tenant)
 

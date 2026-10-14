@@ -37,14 +37,6 @@ type Dependencies struct {
 	EntityID      string
 	KMSKeyID      string
 
-	// AWSRegion and SaaSAccountID identify the gateway's own AWS account and
-	// operating region. They pin any client-supplied per-tenant KMS key ARN to
-	// the gateway account so a tenant admin cannot register a cross-account key
-	// the gateway's role happens to have a grant on. SaaSAccountID is
-	// config.SaaSAccountID; AWSRegion is config.AWSRegion.
-	AWSRegion     string
-	SaaSAccountID string
-
 	// Environment is the parsed deployment environment. It is the sole gate that
 	// decides whether the local-dev auth bypass may be selected:
 	// only config.EnvLocal permits it. In every other environment NewRouter
@@ -213,16 +205,7 @@ func NewHumaAPI(r chi.Router, title, version string) huma.API {
 
 // RegisterAPIRoutes registers all API routes with their handlers.
 func RegisterAPIRoutes(api huma.API, deps Dependencies) {
-	// Pin client-supplied per-tenant KMS keys to the gateway's own account/region.
-	// Strict everywhere except local dev, so a deployed gateway that does not know
-	// its own account refuses a fully-qualified ARN rather than accepting it
-	// unpinned.
-	kmsPolicy := KMSKeyPolicy{
-		AccountID: deps.SaaSAccountID,
-		Region:    deps.AWSRegion,
-		Strict:    !deps.Environment.IsLocal(),
-	}
-	RegisterTenantRoutes(api, deps.Tenants, deps.Apps, kmsPolicy)
+	RegisterTenantRoutes(api, deps.Tenants, deps.Apps)
 	RegisterSourceRoutes(api, deps.Sources)
 	RegisterAppRoutes(api, deps.Apps, deps.Claims, deps.ImportSvc, deps.PreviewSvc)
 	RegisterMappingRoutes(api, deps.Apps, deps.Claims)

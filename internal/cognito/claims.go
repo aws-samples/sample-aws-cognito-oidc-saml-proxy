@@ -4,8 +4,13 @@ import "strings"
 
 // UserClaims represents extracted claims from a Cognito ID token.
 type UserClaims struct {
-	Sub              string
-	Email            string
+	Sub   string
+	Email string
+	// EmailVerified mirrors the token's `email_verified` claim and is the
+	// authority on whether Email may be used as an identifier. The SAML layer
+	// issues an emailAddress NameID only when this is true; an unverified email
+	// is user-chosen at sign-up and falls back to a persistent NameID = Sub
+	// (finding M-6). A missing claim is treated as false.
 	EmailVerified    bool
 	GivenName        string
 	FamilyName       string

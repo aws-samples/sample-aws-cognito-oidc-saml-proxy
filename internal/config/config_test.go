@@ -82,6 +82,25 @@ func TestLoadConfig_EdgeSecretARNLoaded(t *testing.T) {
 	assert.Equal(t, arn, cfg.EdgeAuthSecretARN)
 }
 
+// TestLoadConfig_CookieKeySecretARNLoaded asserts PROXY_COOKIE_KEY_SECRET_ARN
+// is surfaced on Config so saml-sso/oidc-authorize can fetch the shared cookie
+// root key at cold start (M-3). It is not universally required at load time
+// because only two of the eight Lambdas need it; those fail closed at the
+// point of use.
+func TestLoadConfig_CookieKeySecretARNLoaded(t *testing.T) {
+	setRequiredEnv(t)
+	arn := "arn:aws:secretsmanager:eu-north-1:127218179144:secret:dev-cookie-key-AbCdEf"
+	t.Setenv("PROXY_COOKIE_KEY_SECRET_ARN", arn)
+	cfg, err := config.Load()
+	require.NoError(t, err)
+	assert.Equal(t, arn, cfg.CookieKeySecretARN)
+
+	t.Setenv("PROXY_COOKIE_KEY_SECRET_ARN", "")
+	cfg, err = config.Load()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.CookieKeySecretARN)
+}
+
 // TestLoadConfig_LocalWithoutEdgeSecretARN asserts the origin-verify secret ARN
 // remains optional in local dev (no CloudFront edge, no SM fetch): a local
 // config without it must still load, and FetchEdgeSecret returns an empty string

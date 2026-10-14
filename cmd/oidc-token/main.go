@@ -42,6 +42,7 @@ func init() {
 	sessionDB := store.NewDB(dynamoDB, cfg.SessionTable)
 
 	// Config table stores
+	tenantStore := store.NewTenantStore(configDB, cfg.DynamoDBTable)
 	appStore := store.NewAppStore(configDB, cfg.DynamoDBTable)
 	claimStore := store.NewClaimStore(configDB, cfg.DynamoDBTable)
 	sourceStore := store.NewSourceStore(configDB, cfg.DynamoDBTable)
@@ -119,7 +120,7 @@ func init() {
 	// expose login/callback routes. Passing nil instead of an all-zero placeholder
 	// means any mis-routed login request gets ErrCookieSigningDisabled (fail
 	// closed) rather than silently operating under a publicly-known key.
-	if err := proxyoidc.RegisterOIDCRoutes(router, oidcStorage, cfg.BaseURL, appStore, sourceStore, auditLogger, cryptoKey, nil, nil, true); err != nil {
+	if err := proxyoidc.RegisterOIDCRoutes(router, oidcStorage, tenantStore, cfg.BaseURL, appStore, sourceStore, auditLogger, cryptoKey, nil, nil, true); err != nil {
 		slog.Error("failed to register OIDC routes", "error", err)
 		os.Exit(1)
 	}

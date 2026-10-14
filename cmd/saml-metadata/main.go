@@ -96,6 +96,9 @@ func init() {
 	router.Use(middleware.RequireEdgeSecret(edgeSecret))
 
 	router.Route("/t/{tenant}/saml", func(r chi.Router) {
+		// M-5: a suspended tenant's metadata is not disclosed — answer 404 as
+		// if the tenant did not exist.
+		r.Use(middleware.TenantFromPath(tenantStore, middleware.SuspendedAsNotFound()))
 		r.Get("/metadata", tenantIdPHandler.ServeMetadata)
 		r.Get("/metadata/{appId}", tenantIdPHandler.ServeAppMetadata)
 	})

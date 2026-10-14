@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,6 +121,47 @@ func (e *customLoginEnv) createAuthRequest(t *testing.T) string {
 	return created.GetID()
 }
 
+// findCookie returns the cookie with the given name from a Set-Cookie list, or nil.
+func findCookie(cookies []*http.Cookie, name string) *http.Cookie {
+	for _, c := range cookies {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// bindingCookie returns the __Host-oidc_login cookie the handler would set
+// when redirecting flowID to its custom login page.
+func (e *customLoginEnv) bindingCookie(t *testing.T, flowID string) *http.Cookie {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	require.NoError(t, e.handler.setLoginBindingCookie(rr, flowID))
+	c := findCookie(rr.Result().Cookies(), oidcLoginBindingCookieName)
+	require.NotNil(t, c)
+	return c
+}
+
+// postComplete performs the hand-back POST for flowID with an id_token form
+// field and the optional binding cookie.
+func (e *customLoginEnv) postComplete(t *testing.T, flowID, token string, binding *http.Cookie) *http.Response {
+	t.Helper()
+	form := url.Values{}
+	if token != "" {
+		form.Set("id_token", token)
+	}
+	req, err := http.NewRequest(http.MethodPost, e.server.URL+"/t/test/oidc/login/complete?state="+flowID,
+		strings.NewReader(form.Encode()))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if binding != nil {
+		req.AddCookie(binding)
+	}
+	resp, err := noRedirectClient().Do(req)
+	require.NoError(t, err)
+	return resp
+}
+
 func TestOIDC_CustomLogin_RedirectReplacesCognito(t *testing.T) {
 	env := setupCustomLoginEnv(t, "https://login.example.com/start", []string{"https://login.example.com/"})
 	client := noRedirectClient()
@@ -147,11 +189,82 @@ func TestOIDC_CustomLogin_RedirectReplacesCognito(t *testing.T) {
 	assert.Equal(t, "oidc", pl.Protocol)
 	assert.Equal(t, authRequestID, pl.AuthRequestID)
 	assert.Equal(t, env.sourceID, pl.SourceID)
+
+	// M-4: the redirect binds the flow to this browser with a __Host- cookie
+	// that the cross-site hand-back can carry (SameSite=None; Secure; HttpOnly).
+	bind := findCookie(resp.Cookies(), oidcLoginBindingCookieName)
+	require.NotNil(t, bind, "redirect must set the login binding cookie")
+	assert.True(t, bind.Secure)
+	assert.True(t, bind.HttpOnly)
+	assert.Equal(t, http.SameSiteNoneMode, bind.SameSite)
+	assert.Equal(t, "/", bind.Path)
+	assert.Empty(t, bind.Domain, "__Host- cookies must not set Domain")
+	assert.Equal(t, oidcFlowCookieMaxAge, bind.MaxAge)
+	bound := httptest.NewRequest(http.MethodPost, "/t/test/oidc/login/complete", nil)
+	bound.AddCookie(bind)
+	assert.NoError(t, env.handler.verifyLoginBinding(bound, flowID))
+	assert.ErrorIs(t, env.handler.verifyLoginBinding(bound, "some-other-flow"), errLoginBindingMismatch)
+}
+
+// TestOIDC_LoginComplete_NoBindingCookie_Forbidden is the M-4 regression: a
+// hand-back without the browser-binding cookie (an attacker posting their token
+// + the victim's state into the victim's browser) is refused before the pending
+// login is read, so it is neither consumed nor completed.
+func TestOIDC_LoginComplete_NoBindingCookie_Forbidden(t *testing.T) {
+	env := setupCustomLoginEnv(t, "https://login.example.com/start", []string{"https://login.example.com/"})
+	ctx := context.Background()
+	authRequestID := env.createAuthRequest(t)
+	require.NoError(t, env.pending.Create(ctx, &store.PendingLogin{
+		FlowID: "flow-nobind", Protocol: "oidc", TenantSlug: "test", SourceID: env.sourceID, AppID: env.appID, AuthRequestID: authRequestID,
+	}, 10*time.Minute))
+	env.verifier.claims = map[string]interface{}{"sub": "attacker", "email": "attacker@example.com"}
+
+	resp := env.postComplete(t, "flow-nobind", "attacker.id.token", nil)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	assert.Empty(t, env.verifier.gotToken, "token must not be verified without the binding")
+
+	// Pending login intact and AuthRequest not completed.
+	pl, err := env.pending.Get(ctx, "flow-nobind")
+	require.NoError(t, err)
+	assert.Equal(t, authRequestID, pl.AuthRequestID)
+	ar, err := env.storage.AuthRequestByID(ctx, authRequestID)
+	require.NoError(t, err)
+	assert.False(t, ar.Done())
+}
+
+// TestOIDC_LoginComplete_WrongFlowCookie_Forbidden: a binding cookie minted for
+// a different flow does not satisfy this flow's hand-back.
+func TestOIDC_LoginComplete_WrongFlowCookie_Forbidden(t *testing.T) {
+	env := setupCustomLoginEnv(t, "https://login.example.com/start", []string{"https://login.example.com/"})
+	ctx := context.Background()
+	require.NoError(t, env.pending.Create(ctx, &store.PendingLogin{
+		FlowID: "flow-a", Protocol: "oidc", TenantSlug: "test", SourceID: env.sourceID, AuthRequestID: env.createAuthRequest(t),
+	}, 10*time.Minute))
+
+	resp := env.postComplete(t, "flow-a", "tok", env.bindingCookie(t, "flow-b"))
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	_, err := env.pending.Get(ctx, "flow-a")
+	require.NoError(t, err, "pending login must survive a mismatched binding")
+}
+
+// TestOIDC_LoginComplete_ForgedCookie_Forbidden: a cookie not signed by this
+// handler's key is rejected.
+func TestOIDC_LoginComplete_ForgedCookie_Forbidden(t *testing.T) {
+	env := setupCustomLoginEnv(t, "https://login.example.com/start", []string{"https://login.example.com/"})
+	ctx := context.Background()
+	require.NoError(t, env.pending.Create(ctx, &store.PendingLogin{
+		FlowID: "flow-f", Protocol: "oidc", TenantSlug: "test", SourceID: env.sourceID, AuthRequestID: env.createAuthRequest(t),
+	}, 10*time.Minute))
+
+	resp := env.postComplete(t, "flow-f", "tok", &http.Cookie{Name: oidcLoginBindingCookieName, Value: "00000000.Zm9v.deadbeef"})
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
 func TestOIDC_LoginComplete_Success(t *testing.T) {
 	env := setupCustomLoginEnv(t, "https://login.example.com/start", []string{"https://login.example.com/"})
-	client := noRedirectClient()
 	ctx := context.Background()
 	authRequestID := env.createAuthRequest(t)
 
@@ -171,16 +284,22 @@ func TestOIDC_LoginComplete_Success(t *testing.T) {
 		"family_name": "User",
 	}
 
-	form := url.Values{}
-	form.Set("id_token", "the.id.token")
-	resp, err := client.PostForm(env.server.URL+"/t/test/oidc/login/complete?state=flow-ok", form)
-	require.NoError(t, err)
+	// The browser that was redirected carries the M-4 binding cookie.
+	resp := env.postComplete(t, "flow-ok", "the.id.token", env.bindingCookie(t, "flow-ok"))
 	defer func() { _ = resp.Body.Close() }()
 
 	require.Equal(t, http.StatusFound, resp.StatusCode)
 	loc := resp.Header.Get("Location")
 	assert.Contains(t, loc, "/t/test/oidc/authorize/callback")
 	assert.Contains(t, loc, "id="+authRequestID)
+
+	// Success clears the binding cookie with matching attributes.
+	cleared := findCookie(resp.Cookies(), oidcLoginBindingCookieName)
+	require.NotNil(t, cleared, "success must clear the binding cookie")
+	assert.Less(t, cleared.MaxAge, 0)
+	assert.Empty(t, cleared.Value)
+	assert.Equal(t, http.SameSiteNoneMode, cleared.SameSite)
+	assert.True(t, cleared.Secure)
 
 	// Token verified against the source client ID.
 	assert.Equal(t, "test-cognito-client", env.verifier.gotClientID)
@@ -211,6 +330,9 @@ func TestOIDC_LoginComplete_BearerHeaderAlsoWorks(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, env.server.URL+"/t/test/oidc/login/complete?state=flow-bearer", nil)
 	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer header.id.token")
+	// Bearer is just another token carrier for the same browser hand-back; the
+	// M-4 binding cookie is still required.
+	req.AddCookie(env.bindingCookie(t, "flow-bearer"))
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
@@ -221,7 +343,6 @@ func TestOIDC_LoginComplete_BearerHeaderAlsoWorks(t *testing.T) {
 
 func TestOIDC_LoginComplete_InvalidToken(t *testing.T) {
 	env := setupCustomLoginEnv(t, "https://login.example.com/start", []string{"https://login.example.com/"})
-	client := noRedirectClient()
 	ctx := context.Background()
 	authRequestID := env.createAuthRequest(t)
 
@@ -230,39 +351,28 @@ func TestOIDC_LoginComplete_InvalidToken(t *testing.T) {
 	}, 10*time.Minute))
 	env.verifier.err = fmt.Errorf("signature mismatch")
 
-	form := url.Values{}
-	form.Set("id_token", "bad.token")
-	resp, err := client.PostForm(env.server.URL+"/t/test/oidc/login/complete?state=flow-bad", form)
-	require.NoError(t, err)
+	resp := env.postComplete(t, "flow-bad", "bad.token", env.bindingCookie(t, "flow-bad"))
 	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
 func TestOIDC_LoginComplete_MissingFlow(t *testing.T) {
 	env := setupCustomLoginEnv(t, "https://login.example.com/start", []string{"https://login.example.com/"})
-	client := noRedirectClient()
 
-	form := url.Values{}
-	form.Set("id_token", "tok")
-	resp, err := client.PostForm(env.server.URL+"/t/test/oidc/login/complete?state=missing", form)
-	require.NoError(t, err)
+	resp := env.postComplete(t, "missing", "tok", env.bindingCookie(t, "missing"))
 	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestOIDC_LoginComplete_WrongProtocol(t *testing.T) {
 	env := setupCustomLoginEnv(t, "https://login.example.com/start", []string{"https://login.example.com/"})
-	client := noRedirectClient()
 	ctx := context.Background()
 
 	require.NoError(t, env.pending.Create(ctx, &store.PendingLogin{
 		FlowID: "flow-saml", Protocol: "saml", TenantSlug: "test", SourceID: env.sourceID,
 	}, 10*time.Minute))
 
-	form := url.Values{}
-	form.Set("id_token", "tok")
-	resp, err := client.PostForm(env.server.URL+"/t/test/oidc/login/complete?state=flow-saml", form)
-	require.NoError(t, err)
+	resp := env.postComplete(t, "flow-saml", "tok", env.bindingCookie(t, "flow-saml"))
 	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }

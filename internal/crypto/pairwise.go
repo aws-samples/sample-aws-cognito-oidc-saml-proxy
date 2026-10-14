@@ -12,6 +12,16 @@ import (
 // per the SAML2Int specification. It computes HMAC-SHA256 of "sub|entityID"
 // with the provided secret, returns the first 16 bytes encoded as lowercase
 // base32 without padding, followed by "@scope".
+//
+// INTENTIONALLY UNWIRED. A pairwise identifier is only useful if the secret
+// never changes: rotating it re-keys every user at every SP, which is an
+// account-loss event for the relying parties. The gateway's shared secrets
+// (the cookie key and the OIDC crypto key in Secrets Manager) are designed to
+// be rotated, so none of them is suitable, and no non-rotating secret exists
+// in the deployment today. Until one does, the persistent NameID the SAML
+// layer issues is the raw Cognito `sub` (see internal/saml/nameid.go), which
+// is already stable per user and not attacker-chosen. Wiring this helper
+// requires provisioning a dedicated, never-rotated secret first.
 func PairwiseID(cognitoSub, spEntityID, secret, scope string) string {
 	// Create HMAC with the secret
 	h := hmac.New(sha256.New, []byte(secret))

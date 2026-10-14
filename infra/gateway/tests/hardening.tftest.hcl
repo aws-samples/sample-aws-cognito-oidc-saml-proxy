@@ -313,6 +313,49 @@ run "api_endpoint_output_is_fronted" {
   }
 }
 
+# M-3: the login-cookie root key is a single 32-byte Secrets Manager secret
+# shared by saml-sso and oidc-authorize, encrypted with the gateway KMS key,
+# rather than a per-instance kms:GenerateDataKey output that no other instance
+# could read. IAM documents are mocked, so the GetSecretValue grant cannot be
+# asserted here; the env wiring is asserted via the local that feeds the
+# Lambda module.
+run "cookie_key_is_shared_32_byte_secret" {
+  # apply (against the mock provider, still fully offline): the secret's id is
+  # computed, so the secret_version -> secret linkage is only known post-apply.
+  command = apply
+
+  assert {
+    condition     = random_bytes.cookie_key.length == 32
+    error_message = "Cookie root key must be exactly 32 bytes (SignedCookie rejects any other length)."
+  }
+
+  assert {
+    condition     = aws_secretsmanager_secret.cookie_key.kms_key_id == module.kms_encryption.key_id
+    error_message = "Cookie key secret must be encrypted with the gateway KMS encryption key."
+  }
+
+  assert {
+    condition     = aws_secretsmanager_secret_version.cookie_key.secret_id == aws_secretsmanager_secret.cookie_key.id
+    error_message = "Cookie key secret version must belong to the cookie key secret."
+  }
+
+  assert {
+    condition = alltrue([
+      for fn in ["saml-sso", "oidc-authorize"] :
+      contains(keys(local.fn_env_vars[fn]), "PROXY_COOKIE_KEY_SECRET_ARN")
+    ])
+    error_message = "saml-sso and oidc-authorize must receive PROXY_COOKIE_KEY_SECRET_ARN."
+  }
+
+  assert {
+    condition = alltrue([
+      for fn, env in local.fn_env_vars :
+      !contains(keys(env), "PROXY_KMS_ENCRYPTION_KEY_ID")
+    ])
+    error_message = "No function may still receive the retired PROXY_KMS_ENCRYPTION_KEY_ID (per-instance GenerateDataKey path)."
+  }
+}
+
 # The audit-write-failure signal the Go side emits is turned into a CloudWatch
 # metric and alarmed. A metric filter attaches to every per-capability Lambda
 # log group (the slog line lands there, not in the audit log group), publishing

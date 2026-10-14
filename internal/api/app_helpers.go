@@ -121,39 +121,12 @@ func toRoleMappings(in []RoleMappingInput) []tenant.RoleMapping {
 	return out
 }
 
-// nameIDFormatURNs maps short NameID-format codes to their canonical SAML URNs.
-var nameIDFormatURNs = map[string]string{
-	"email":        "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
-	"emailaddress": "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
-	"persistent":   "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
-	"transient":    "urn:oasis:names:tc:SAML:2.0:nameid-format:transient",
-	"unspecified":  "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified",
-}
-
 // normalizeNameIDFormat converts a NameID format into the canonical SAML URN
-// that the SAML layer writes into IdP metadata. It accepts both short codes
-// (email/persistent/transient/unspecified) and full URNs (in any case),
-// returning the canonical URN. Unrecognized values are passed through
-// unchanged so custom formats still work.
+// that the SAML layer writes into IdP metadata and uses to choose the subject
+// NameID. It accepts both short codes (email/persistent/transient/unspecified)
+// and full URNs (in any case). Unrecognized values are passed through unchanged
+// so custom formats still work. The table lives in the tenant package so the
+// SAML layer applies exactly the same normalisation.
 func normalizeNameIDFormat(v string) string {
-	key := strings.ToLower(strings.TrimSpace(v))
-	if key == "" {
-		return nameIDFormatURNs["unspecified"]
-	}
-	if urn, ok := nameIDFormatURNs[key]; ok {
-		return urn
-	}
-	// Already a URN (possibly differing only in case) — map known lowercased
-	// URNs back to canonical casing; otherwise pass through.
-	switch key {
-	case "urn:oasis:names:tc:saml:1.1:nameid-format:emailaddress":
-		return nameIDFormatURNs["email"]
-	case "urn:oasis:names:tc:saml:2.0:nameid-format:persistent":
-		return nameIDFormatURNs["persistent"]
-	case "urn:oasis:names:tc:saml:2.0:nameid-format:transient":
-		return nameIDFormatURNs["transient"]
-	case "urn:oasis:names:tc:saml:1.1:nameid-format:unspecified":
-		return nameIDFormatURNs["unspecified"]
-	}
-	return v
+	return tenant.CanonicalNameIDFormat(v)
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/crewjam/saml"
 	"github.com/go-chi/chi/v5"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/store"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/tenant"
@@ -156,6 +157,87 @@ func TestSPProvider_GetServiceProvider_WithSigningCert(t *testing.T) {
 	spSSO := ed.SPSSODescriptors[0]
 	require.Len(t, spSSO.KeyDescriptors, 1)
 	assert.Equal(t, "signing", spSSO.RoleDescriptor.KeyDescriptors[0].Use)
+}
+
+// createEncryptionCertApp seeds an SP with a stored encryption certificate and
+// the given EncryptAssertion flag.
+func createEncryptionCertApp(t *testing.T, appStore *store.AppStore, entityID string, encrypt bool) {
+	t.Helper()
+	_, err := appStore.Create(context.Background(), "acme", &tenant.Application{
+		DisplayName: "SP with enc cert", Protocol: "saml", SourceID: "source-1", Status: "active",
+	}, &tenant.SAMLConfig{
+		EntityID:          entityID,
+		AcsURL:            "https://sp-enc.example.com/saml/acs",
+		AcsURLs:           []string{"https://sp-enc.example.com/saml/acs"},
+		SigningCertPem:    testCertPEM,
+		EncryptionCertPem: testCertPEM,
+		SignResponse:      true,
+		SignAssertion:     true,
+		EncryptAssertion:  encrypt,
+	})
+	require.NoError(t, err)
+}
+
+// TestBuildEntityDescriptor_EncryptionKeyDescriptorFollowsFlag is the M-8
+// regression: crewjam encrypts whenever the SP descriptor carries an
+// encryption cert, so a stored certificate must only be advertised when the
+// administrator actually enabled EncryptAssertion.
+func TestBuildEntityDescriptor_EncryptionKeyDescriptorFollowsFlag(t *testing.T) {
+	uses := func(ed *saml.EntityDescriptor) []string {
+		var out []string
+		for _, kd := range ed.SPSSODescriptors[0].KeyDescriptors {
+			out = append(out, kd.Use)
+		}
+		return out
+	}
+
+	t.Run("flag off: cert stored but not advertised", func(t *testing.T) {
+		appStore := newTestAppStore()
+		createEncryptionCertApp(t, appStore, "https://sp-enc-off.example.com/saml", false)
+		ed, err := NewSPProvider(appStore).GetServiceProvider(requestForTenant("acme"), "https://sp-enc-off.example.com/saml")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"signing"}, uses(ed))
+	})
+
+	t.Run("flag on: encryption descriptor advertised", func(t *testing.T) {
+		appStore := newTestAppStore()
+		createEncryptionCertApp(t, appStore, "https://sp-enc-on.example.com/saml", true)
+		ed, err := NewSPProvider(appStore).GetServiceProvider(requestForTenant("acme"), "https://sp-enc-on.example.com/saml")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"signing", "encryption"}, uses(ed))
+	})
+
+	t.Run("flag on without a cert: nothing to advertise", func(t *testing.T) {
+		ed := buildEntityDescriptor(&tenant.SAMLConfig{
+			EntityID: "https://sp.example.com/saml", AcsURL: "https://sp.example.com/acs", EncryptAssertion: true,
+		})
+		assert.Empty(t, ed.SPSSODescriptors[0].KeyDescriptors)
+	})
+}
+
+// TestSPProvider_GetServiceProvider_WantAuthnRequestsSigned_FailsClosed is the
+// M-8 regression: an SP that requires signed AuthnRequests is refused with an
+// error that is NOT os.ErrNotExist, so crewjam answers 500 (logged) rather than
+// silently serving an SP whose requests are never verified.
+func TestSPProvider_GetServiceProvider_WantAuthnRequestsSigned_FailsClosed(t *testing.T) {
+	appStore := newTestAppStore()
+	_, err := appStore.Create(context.Background(), "acme", &tenant.Application{
+		DisplayName: "Signed-request SP", Protocol: "saml", SourceID: "source-1", Status: "active",
+	}, &tenant.SAMLConfig{
+		EntityID:                "https://sp-signed.example.com/saml",
+		AcsURL:                  "https://sp-signed.example.com/saml/acs",
+		AcsURLs:                 []string{"https://sp-signed.example.com/saml/acs"},
+		SignResponse:            true,
+		SignAssertion:           true,
+		WantAuthnRequestsSigned: true,
+	})
+	require.NoError(t, err)
+
+	ed, err := NewSPProvider(appStore).GetServiceProvider(requestForTenant("acme"), "https://sp-signed.example.com/saml")
+	assert.Nil(t, ed)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errAuthnRequestSignatureUnsupported)
+	assert.NotErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestSPProvider_GetServiceProvider_MultipleACSURLs(t *testing.T) {

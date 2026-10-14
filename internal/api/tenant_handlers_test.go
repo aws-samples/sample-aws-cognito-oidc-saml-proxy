@@ -28,7 +28,7 @@ func newTestTenantAPIWithApps(t *testing.T) (humatest.TestAPI, *store.TenantStor
 	tenantStore := store.NewTenantStore(memStore, "test")
 	appStore := store.NewAppStore(memStore, "test")
 	api.UseMiddleware(injectOnboardingTenant("gateway-ops", []string{middleware.GlobalOperatorGroup}))
-	RegisterTenantRoutes(api, tenantStore, appStore, testKMSKeyPolicy())
+	RegisterTenantRoutes(api, tenantStore, appStore)
 	return api, tenantStore, appStore
 }
 
@@ -42,16 +42,10 @@ func newTestTenantAPIAs(t *testing.T, callerSlug string, groups []string) (humat
 	tenantStore := store.NewTenantStore(memStore, "test")
 	appStore := store.NewAppStore(memStore, "test")
 	api.UseMiddleware(injectOnboardingTenant(callerSlug, groups))
-	RegisterTenantRoutes(api, tenantStore, appStore, testKMSKeyPolicy())
+	RegisterTenantRoutes(api, tenantStore, appStore)
 	return api, tenantStore
 }
 
-// testKMSKeyPolicy returns a KMS key policy pinned to a fixed test account and
-// region, mirroring a deployed (Strict) gateway so tests exercise the same
-// validation path production uses.
-func testKMSKeyPolicy() KMSKeyPolicy {
-	return KMSKeyPolicy{AccountID: "111122223333", Region: "eu-north-1", Strict: true}
-}
 
 func TestDeleteTenant_Success(t *testing.T) {
 	api, tenantStore, _ := newTestTenantAPIWithApps(t)
@@ -380,7 +374,7 @@ func TestTenantCRUD_NoContextFailsClosed(t *testing.T) {
 	memStore := store.NewMemoryStore()
 	tenantStore := store.NewTenantStore(memStore, "test")
 	appStore := store.NewAppStore(memStore, "test")
-	RegisterTenantRoutes(api, tenantStore, appStore, testKMSKeyPolicy())
+	RegisterTenantRoutes(api, tenantStore, appStore)
 	seedTenant(t, tenantStore, "acme")
 
 	assert.Equal(t, http.StatusForbidden, api.Get("/api/v1/tenants").Code, "list must fail closed")

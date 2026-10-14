@@ -6,13 +6,15 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/cognito"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/crypto"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/store"
+	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/tenant"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"github.com/zitadel/oidc/v3/pkg/op"
 )
@@ -26,6 +28,13 @@ type authRequestItem struct {
 }
 
 // accessTokenItem stores opaque access tokens in DynamoDB.
+//
+// The Cognito claim set is persisted on the item because the userinfo and
+// introspection endpoints (oidc-discovery Lambda) only ever receive the opaque
+// token: they never see the auth request or the refresh token, and they run in
+// a different process from the login (oidc-authorize) and the code exchange
+// (oidc-token). Everything a userinfo response may contain must therefore be
+// recoverable from this record alone (finding M-2).
 type accessTokenItem struct {
 	PK        string    `dynamo:"PK,hash" json:"-"`
 	SK        string    `dynamo:"SK,range" json:"-"`
@@ -36,6 +45,27 @@ type accessTokenItem struct {
 	Scopes    []string  `dynamo:"scopes" json:"scopes"`
 	ClientID  string    `dynamo:"clientID" json:"clientID"`
 	ExpiresAt time.Time `dynamo:"expiresAt" json:"expiresAt"`
+
+	// Cognito claims captured at login and carried on the token.
+	Email            string            `dynamo:"email,omitempty" json:"email,omitempty"`
+	GivenName        string            `dynamo:"givenName,omitempty" json:"givenName,omitempty"`
+	FamilyName       string            `dynamo:"familyName,omitempty" json:"familyName,omitempty"`
+	EmailVerified    bool              `dynamo:"emailVerified,omitempty" json:"emailVerified,omitempty"`
+	Groups           []string          `dynamo:"groups,omitempty" json:"groups,omitempty"`
+	CustomAttributes map[string]string `dynamo:"customAttributes,omitempty" json:"customAttributes,omitempty"`
+}
+
+// claims rebuilds the SubjectClaims persisted on the access-token record.
+func (i *accessTokenItem) claims() SubjectClaims {
+	return SubjectClaims{
+		Sub:              i.Subject,
+		Email:            i.Email,
+		EmailVerified:    i.EmailVerified,
+		GivenName:        i.GivenName,
+		FamilyName:       i.FamilyName,
+		Groups:           i.Groups,
+		CustomAttributes: i.CustomAttributes,
+	}
 }
 
 // Token-type discriminators stored on a sessionTokenIndexItem so TerminateSession
@@ -59,24 +89,62 @@ type sessionTokenIndexItem struct {
 	TokenRef  string `dynamo:"tokenRef" json:"tokenRef"`
 }
 
-// userClaims holds Cognito claims for a user session.
-type userClaims struct {
-	Email      string
-	GivenName  string
-	FamilyName string
-	Groups     []string
+// SubjectClaims is the identity claim set the gateway captures from the Cognito
+// ID token at login and carries, persisted, through the authorization request,
+// the refresh token and the access token. Every token/userinfo/introspection
+// callback sources its claims from one of those stored records — never from
+// process memory — because login, code exchange and userinfo each run on a
+// different Lambda (finding M-2).
+type SubjectClaims struct {
+	Sub   string
+	Email string
 	// EmailVerified carries Cognito's real email_verified claim. It MUST reflect
 	// the value asserted by the upstream pool — never a hard-coded true.
 	// Relying parties use email_verified to decide whether to trust the address
 	// (e.g. for account matching), so emitting true for an unverified address is
 	// an account-takeover primitive. The zero value (false) is the safe default:
 	// an absent or non-boolean upstream claim leaves this false.
-	EmailVerified bool
+	EmailVerified    bool
+	GivenName        string
+	FamilyName       string
+	Groups           []string
+	CustomAttributes map[string]string
+}
+
+// SubjectClaimsFromCognito converts the claims extracted from a verified Cognito
+// ID token into the set persisted with the OIDC request.
+func SubjectClaimsFromCognito(c *cognito.UserClaims) SubjectClaims {
+	if c == nil {
+		return SubjectClaims{}
+	}
+	return SubjectClaims{
+		Sub:              c.Sub,
+		Email:            c.Email,
+		EmailVerified:    c.EmailVerified,
+		GivenName:        c.GivenName,
+		FamilyName:       c.FamilyName,
+		Groups:           c.Groups,
+		CustomAttributes: c.CustomAttributes,
+	}
+}
+
+// fullName joins the given and family names when both are present. A single
+// name component is not promoted to `name`, matching the previous behaviour.
+func (c SubjectClaims) fullName() string {
+	if c.GivenName != "" && c.FamilyName != "" {
+		return c.GivenName + " " + c.FamilyName
+	}
+	return ""
 }
 
 // Storage implements op.Storage for the Identity Federation Gateway.
 // It delegates to existing stores for application/tenant data and uses
 // DynamoDB (via TableAPI) for transient OIDC state (auth requests, tokens).
+//
+// Storage holds no per-user state: the deployed topology runs the login
+// (oidc-authorize), the token endpoint (oidc-token) and userinfo/introspection
+// (oidc-discovery) as separate Lambda functions, so anything cached in process
+// memory on one of them is invisible to the others.
 type Storage struct {
 	appStore    *store.AppStore
 	claimStore  *store.ClaimStore
@@ -85,7 +153,6 @@ type Storage struct {
 	db          store.TableAPI
 	keyID       string
 	extraKeys   []op.Key // additional public keys advertised in JWKS (e.g. backup key during a roll)
-	userClaims  sync.Map // map[claimsKey(tenant,sub)]*userClaims — tenant-scoped to prevent cross-tenant claim contamination
 }
 
 // NewStorage creates a new OIDC Storage.
@@ -126,15 +193,6 @@ func oidcSessionIndexPK(tenant, subject, clientID string) string {
 	return fmt.Sprintf("OIDCSESSION#t:%s#u:%s#c:%s", tenant, subject, clientID)
 }
 func oidcSessionIndexSK(tokenRef string) string { return fmt.Sprintf("TOKEN#%s", tokenRef) }
-
-// claimsKey composes the in-memory userClaims cache key from the tenant slug and
-// the Cognito subject. Keying on the bare sub alone lets a subject value that
-// collides across tenants read another tenant's cached claims; the tenant
-// slug (derived from the request issuer) namespaces the entry. An empty tenant is
-// kept distinct from any real slug so it can never alias a tenant-scoped entry.
-func claimsKey(tenant, sub string) string {
-	return "t:" + tenant + "#u:" + sub
-}
 
 func generateOpaqueToken() (string, error) {
 	b := make([]byte, 32)
@@ -273,44 +331,35 @@ func (s *Storage) SaveAuthCode(ctx context.Context, id, code string) error {
 	return nil
 }
 
-// CompleteAuthRequest marks an authorization request as done with the given user ID.
-// This is called after the user successfully authenticates via Cognito.
+// CompleteAuthRequest marks an authorization request as done for the subject in
+// c.Sub and persists the full Cognito claim set on the request record. It is
+// called after the user successfully authenticates via Cognito, on the
+// oidc-authorize Lambda; the code exchange that reads the record back runs on
+// oidc-token, so the record is the ONLY hand-off (finding M-2).
 //
-// emailVerified is Cognito's real email_verified claim for this login.
-// It is persisted and propagated verbatim so the ID token, userinfo, and
-// introspection responses reflect the upstream pool's assertion rather than an
-// unconditional true.
-func (s *Storage) CompleteAuthRequest(ctx context.Context, id, userID, email, givenName, familyName string, emailVerified bool, groups []string) error {
+// c.EmailVerified is Cognito's real email_verified claim for this login. It is
+// persisted and propagated verbatim so the ID token, userinfo, and introspection
+// responses reflect the upstream pool's assertion rather than an unconditional
+// true.
+func (s *Storage) CompleteAuthRequest(ctx context.Context, id string, c SubjectClaims) error {
 	var item authRequestItem
 	if err := s.db.Get(ctx, oidcAuthRequestPK(id), oidcAuthRequestSK(), &item); err != nil {
 		return fmt.Errorf("auth request %q not found: %w", id, err)
 	}
-	item.UserID = userID
+	item.UserID = c.Sub
 	item.IsDone = true
 	item.AuthTime = time.Now()
-	item.CognitoEmail = email
-	item.CognitoGivenName = givenName
-	item.CognitoFamilyName = familyName
-	item.CognitoEmailVerified = emailVerified
-	item.CognitoGroups = groups
+	item.CognitoEmail = c.Email
+	item.CognitoGivenName = c.GivenName
+	item.CognitoFamilyName = c.FamilyName
+	item.CognitoEmailVerified = c.EmailVerified
+	item.CognitoGroups = c.Groups
+	item.CognitoCustomAttributes = c.CustomAttributes
 	item.PK = oidcAuthRequestPK(id)
 	item.SK = oidcAuthRequestSK()
 	if err := s.db.Put(ctx, &item); err != nil {
 		return fmt.Errorf("failed to complete auth request: %w", err)
 	}
-
-	// Store claims in the user claims cache for quick lookup during token/userinfo
-	// requests. The cache is keyed by (tenant, sub) so a subject that collides
-	// across tenants cannot read another tenant's claims. The tenant comes
-	// from the auth request itself, which recorded the issuer's tenant at creation.
-	s.userClaims.Store(claimsKey(item.TenantSlug, userID), &userClaims{
-		Email:         email,
-		GivenName:     givenName,
-		FamilyName:    familyName,
-		EmailVerified: emailVerified,
-		Groups:        groups,
-	})
-
 	return nil
 }
 
@@ -334,8 +383,6 @@ func (s *Storage) CreateAccessToken(ctx context.Context, req op.TokenRequest) (s
 		return "", time.Time{}, err
 	}
 
-	expiration := time.Now().Add(1 * time.Hour)
-
 	// Extract ClientID from the request. Both the authorization-code
 	// (*AuthRequest) and refresh-token (*refreshTokenRequest) paths expose it.
 	var clientID string
@@ -343,17 +390,32 @@ func (s *Storage) CreateAccessToken(ctx context.Context, req op.TokenRequest) (s
 		clientID = cg.GetClientID()
 	}
 
+	// The access token lives as long as the client's AccessTokenLifetimeSec
+	// allows (bounded; finding M-8), mirroring refreshTokenLifetime.
+	expiration := time.Now().Add(s.accessTokenLifetime(ctx, clientID))
+
+	// Carry the Cognito claims onto the token record: userinfo and introspection
+	// receive only the opaque token and run on a different Lambda, so the
+	// record is their sole source of claims.
+	claims := claimsFromRequest(req)
+
 	accessTTL := expiration.Add(1 * time.Hour).Unix() // Auto-delete 1h after expiry
 	item := accessTokenItem{
-		PK:        oidcAccessTokenPK(tokenID),
-		SK:        oidcAccessTokenSK(),
-		TTL:       accessTTL,
-		TokenID:   tokenID,
-		Subject:   req.GetSubject(),
-		Audience:  req.GetAudience(),
-		Scopes:    req.GetScopes(),
-		ClientID:  clientID,
-		ExpiresAt: expiration,
+		PK:               oidcAccessTokenPK(tokenID),
+		SK:               oidcAccessTokenSK(),
+		TTL:              accessTTL,
+		TokenID:          tokenID,
+		Subject:          req.GetSubject(),
+		Audience:         req.GetAudience(),
+		Scopes:           req.GetScopes(),
+		ClientID:         clientID,
+		ExpiresAt:        expiration,
+		Email:            claims.Email,
+		GivenName:        claims.GivenName,
+		FamilyName:       claims.FamilyName,
+		EmailVerified:    claims.EmailVerified,
+		Groups:           claims.Groups,
+		CustomAttributes: claims.CustomAttributes,
 	}
 
 	if err := s.db.Put(ctx, &item); err != nil {
@@ -412,6 +474,8 @@ func (s *Storage) CreateAccessAndRefreshTokens(ctx context.Context, req op.Token
 		FamilyName:    claims.FamilyName,
 		EmailVerified: claims.EmailVerified,
 		Groups:        claims.Groups,
+		// CustomAttributes feed the per-app claim mappings on refresh.
+		CustomAttributes: claims.CustomAttributes,
 	}
 	if err := s.db.Put(ctx, &item); err != nil {
 		return "", "", time.Time{}, fmt.Errorf("failed to store refresh token: %w", err)
@@ -431,6 +495,21 @@ func (s *Storage) CreateAccessAndRefreshTokens(ctx context.Context, req op.Token
 	}
 
 	return accessTokenID, refreshToken, expiration, nil
+}
+
+// accessTokenLifetime resolves the access-token lifetime for a client: its
+// OIDCConfig.AccessTokenLifetimeSec clamped to the shared token-lifetime
+// bounds, or defaultTokenLifetime when unset (0) or the client cannot be
+// resolved. Lookup failures are non-fatal — they just yield the default.
+func (s *Storage) accessTokenLifetime(ctx context.Context, clientID string) time.Duration {
+	if clientID == "" {
+		return defaultTokenLifetime
+	}
+	_, _, oidcCfg, err := s.appStore.GetByClientID(ctx, clientID)
+	if err != nil || oidcCfg == nil {
+		return defaultTokenLifetime
+	}
+	return boundedTokenLifetime(oidcCfg.AccessTokenLifetimeSec)
 }
 
 // refreshTokenLifetime resolves the refresh-token lifetime for a client,
@@ -463,21 +542,29 @@ func (s *Storage) TokenRequestByRefreshToken(ctx context.Context, refreshToken s
 		return nil, op.ErrInvalidRefreshToken
 	}
 
-	// Repopulate the in-memory claims cache so the re-issued ID token and
-	// userinfo response carry the same claims as the original login. This
-	// matters across Lambda invocations where the cache starts empty. The cache
-	// is keyed by (tenant, sub) to keep tenants isolated; the tenant is
-	// derived from the request issuer, which is present on the token endpoint.
-	claims := userClaims{
-		Email:         item.Email,
-		GivenName:     item.GivenName,
-		FamilyName:    item.FamilyName,
-		EmailVerified: item.EmailVerified,
-		Groups:        item.Groups,
+	// M-5: a refresh token outlives the application's status. If the owning
+	// app has been deleted or disabled since the token was issued, refuse the
+	// grant (zitadel surfaces op.ErrInvalidRefreshToken as invalid_grant) and
+	// drop the token so re-enabling the app cannot resurrect it without a
+	// fresh login.
+	_, app, _, err := s.appStore.GetByClientID(ctx, item.ClientID)
+	if err != nil || app.Status != "active" {
+		status := "<unknown>"
+		if app != nil {
+			status = app.Status
+		}
+		slog.Warn("refresh token refused: client not active",
+			"clientId", item.ClientID,
+			"status", status,
+			"error", err,
+		)
+		_ = s.db.Delete(ctx, oidcRefreshTokenPK(refreshToken), oidcRefreshTokenSK())
+		return nil, op.ErrInvalidRefreshToken
 	}
-	tenantSlug := tenantSlugFromIssuer(op.IssuerFromContext(ctx))
-	s.userClaims.Store(claimsKey(tenantSlug, item.Subject), &claims)
 
+	// The Cognito claims travel on the returned request so the re-issued ID
+	// token (SetUserinfoFromRequest) and the rotated refresh/access records
+	// carry the same claims as the original login — no process-local state.
 	return &refreshTokenRequest{
 		clientID: item.ClientID,
 		subject:  item.Subject,
@@ -485,7 +572,7 @@ func (s *Storage) TokenRequestByRefreshToken(ctx context.Context, refreshToken s
 		scopes:   item.Scopes,
 		amr:      item.AMR,
 		authTime: item.AuthTime,
-		claims:   claims,
+		claims:   item.claims(),
 	}, nil
 }
 
@@ -671,6 +758,16 @@ func (s *Storage) GetClientByClientID(ctx context.Context, clientID string) (op.
 		return nil, fmt.Errorf("client %q not found in tenant %q", clientID, issuerTenant)
 	}
 
+	// M-5: a disabled application must not be usable as an OIDC client. This
+	// covers authorize, token (code and refresh grants) and credential checks,
+	// all of which resolve the client through this method. Returned as an
+	// *oidc.Error so the refresh path (which passes storage errors through
+	// unwrapped) answers invalid_client instead of a 500 server_error.
+	if app.Status != "active" {
+		slog.Warn("oidc client refused: application not active", "clientId", clientID, "status", app.Status)
+		return nil, oidc.ErrInvalidClient().WithDescription("client %q is not active", clientID)
+	}
+
 	return NewClient(app, oidcCfg), nil
 }
 
@@ -709,56 +806,44 @@ func (s *Storage) AuthorizeClientIDSecret(ctx context.Context, clientID, clientS
 	return nil
 }
 
-// SetUserinfoFromScopes populates userinfo from scopes (deprecated in favor of SetUserinfoFromRequest).
+// ---------- Claims ----------
+//
+// Every callback below sources its claims from a persisted record — the auth
+// request (code grant), the refresh-token item (refresh grant) or the
+// access-token item (userinfo / introspection) — never from process memory.
+// zitadel/oidc calls SetUserinfoFromScopes and then SetUserinfoFromRequest when
+// minting an ID token; the UserInfo it assembles is merged into the token, so
+// the ID token and the userinfo endpoint share one claim source.
+
+// SetUserinfoFromScopes only sets the subject. zitadel marks this hook as
+// deprecated in favour of SetUserinfoFromRequest, which has the request (and
+// therefore the stored claims) in hand; the (userID, clientID) pair alone does
+// not identify a record.
 func (s *Storage) SetUserinfoFromScopes(ctx context.Context, userinfo *oidc.UserInfo, userID, clientID string, scopes []string) error {
 	userinfo.Subject = userID
-
-	// Load Cognito claims from cache if available, scoped to the request's tenant
-	// so one tenant cannot read another's cached claims for a colliding sub.
-	tenantSlug := tenantSlugFromIssuer(op.IssuerFromContext(ctx))
-	var uc *userClaims
-	if cached, ok := s.userClaims.Load(claimsKey(tenantSlug, userID)); ok {
-		uc = cached.(*userClaims)
-	}
-
-	// Populate claims based on requested scopes.
-	for _, scope := range scopes {
-		switch scope {
-		case "email":
-			if uc != nil && uc.Email != "" {
-				userinfo.Email = uc.Email
-			} else {
-				userinfo.Email = userID // Fallback to userID
-			}
-			// email_verified reflects Cognito's real claim, never a hard-coded
-			// true. With no cached claims (uc == nil) it stays false: an
-			// unverified or unknown address must not be advertised as verified.
-			userinfo.EmailVerified = oidc.Bool(uc != nil && uc.EmailVerified)
-		case "profile":
-			if uc != nil {
-				if uc.GivenName != "" && uc.FamilyName != "" {
-					userinfo.Name = uc.GivenName + " " + uc.FamilyName
-				}
-				if uc.GivenName != "" {
-					userinfo.GivenName = uc.GivenName
-				}
-				if uc.FamilyName != "" {
-					userinfo.FamilyName = uc.FamilyName
-				}
-				if uc.Email != "" {
-					userinfo.PreferredUsername = uc.Email
-				} else {
-					userinfo.PreferredUsername = userID
-				}
-			} else {
-				userinfo.PreferredUsername = userID
-			}
-		}
-	}
 	return nil
 }
 
-// SetUserinfoFromToken populates userinfo from a stored token.
+// SetUserinfoFromRequest populates the ID-token claims from the token request's
+// persisted Cognito claims (op.CanSetUserinfoFromRequest). request is the
+// *AuthRequest loaded by code on the authorization-code grant or the
+// *refreshTokenRequest rebuilt from the refresh-token item on the refresh
+// grant; any other request type carries no claims and is left untouched.
+func (s *Storage) SetUserinfoFromRequest(ctx context.Context, userinfo *oidc.UserInfo, request op.IDTokenRequest, scopes []string) error {
+	switch request.(type) {
+	case *AuthRequest, *refreshTokenRequest:
+	default:
+		return nil
+	}
+	c := claimsFromRequest(request)
+	applyStandardClaims(userinfo, c, scopes)
+	s.applyPrivateClaims(ctx, userinfo, request.GetClientID(), c)
+	return nil
+}
+
+// SetUserinfoFromToken populates the userinfo response from the access-token
+// record the bearer resolves to. The claims come from the record itself: the
+// userinfo endpoint runs on its own Lambda and the opaque token is all it has.
 func (s *Storage) SetUserinfoFromToken(ctx context.Context, userinfo *oidc.UserInfo, tokenID, subject, origin string) error {
 	// RFC 7662 §2.2 / RFC 6750: userinfo MUST NOT be served for an expired or
 	// revoked access token. Revocation deletes the record, so a missing record is
@@ -772,44 +857,9 @@ func (s *Storage) SetUserinfoFromToken(ctx context.Context, userinfo *oidc.UserI
 	}
 
 	userinfo.Subject = subject
-
-	// Enrich with cached user claims, scoped to the request's tenant so a colliding
-	// sub across tenants cannot leak another tenant's claims.
-	tenantSlug := tenantSlugFromIssuer(op.IssuerFromContext(ctx))
-	if cached, ok := s.userClaims.Load(claimsKey(tenantSlug, subject)); ok {
-		uc := cached.(*userClaims)
-		if uc.Email != "" {
-			userinfo.Email = uc.Email
-		} else {
-			userinfo.Email = subject // Fallback to subject
-		}
-		// Real Cognito email_verified claim, not a hard-coded true.
-		userinfo.EmailVerified = oidc.Bool(uc.EmailVerified)
-
-		if uc.GivenName != "" && uc.FamilyName != "" {
-			userinfo.Name = uc.GivenName + " " + uc.FamilyName
-		}
-		if uc.GivenName != "" {
-			userinfo.GivenName = uc.GivenName
-		}
-		if uc.FamilyName != "" {
-			userinfo.FamilyName = uc.FamilyName
-		}
-		if uc.Email != "" {
-			userinfo.PreferredUsername = uc.Email
-		} else {
-			userinfo.PreferredUsername = subject
-		}
-	} else {
-		// No cached claims: fall back to the subject as the address, but it is
-		// synthetic and unverified, so email_verified is false. Emitting
-		// true here would let a relying party trust an address the gateway never
-		// confirmed.
-		userinfo.Email = subject
-		userinfo.EmailVerified = oidc.Bool(false)
-		userinfo.PreferredUsername = subject
-	}
-
+	c := item.claims()
+	applyStandardClaims(userinfo, c, item.Scopes)
+	s.applyPrivateClaims(ctx, userinfo, item.ClientID, c)
 	return nil
 }
 
@@ -840,49 +890,214 @@ func (s *Storage) SetIntrospectionFromToken(ctx context.Context, resp *oidc.Intr
 	resp.TokenType = oidc.BearerToken
 	resp.Expiration = oidc.FromTime(item.ExpiresAt)
 
-	// Enrich with cached user claims, scoped to the request's tenant so a colliding
-	// sub across tenants cannot leak another tenant's claims.
-	tenantSlug := tenantSlugFromIssuer(op.IssuerFromContext(ctx))
-	if cached, ok := s.userClaims.Load(claimsKey(tenantSlug, item.Subject)); ok {
-		uc := cached.(*userClaims)
-		resp.Username = uc.Email
-		resp.Email = uc.Email
-		// Real Cognito email_verified claim, not a hard-coded true.
-		resp.EmailVerified = oidc.Bool(uc.EmailVerified)
-		if uc.GivenName != "" && uc.FamilyName != "" {
-			resp.Name = uc.GivenName + " " + uc.FamilyName
-		}
-		resp.GivenName = uc.GivenName
-		resp.FamilyName = uc.FamilyName
+	// Identity claims come from the token record. The address is only reported
+	// when Cognito supplied one — the subject is never substituted for it.
+	c := item.claims()
+	if c.Email != "" {
+		resp.Username = c.Email
+		resp.Email = c.Email
 	}
+	// Real Cognito email_verified claim, not a hard-coded true.
+	resp.EmailVerified = oidc.Bool(c.EmailVerified)
+	resp.Name = c.fullName()
+	resp.GivenName = c.GivenName
+	resp.FamilyName = c.FamilyName
 
 	return nil
 }
 
-// GetPrivateClaimsFromScopes returns additional private claims based on scopes.
+// GetPrivateClaimsFromScopes is superseded by GetPrivateClaimsFromRequest, which
+// zitadel prefers when implemented; with only (userID, clientID) there is no
+// record to read claims from, so this contributes nothing.
 func (s *Storage) GetPrivateClaimsFromScopes(ctx context.Context, userID, clientID string, scopes []string) (map[string]any, error) {
-	// zitadel/oidc calls this with standard scopes (email, profile) REMOVED.
-	// Standard claims are set via SetUserinfoFromScopes which zitadel merges into the token.
-	// Here we only add non-standard private claims like groups.
-	claims := make(map[string]any)
+	return nil, nil
+}
 
-	// Tenant-scoped cache lookup so a colliding sub cannot pull another tenant's
-	// groups into this token.
-	tenantSlug := tenantSlugFromIssuer(op.IssuerFromContext(ctx))
-	cached, ok := s.userClaims.Load(claimsKey(tenantSlug, userID))
-	if !ok {
+// GetPrivateClaimsFromRequest returns the private claims (groups and per-app
+// mapped claims) for a JWT access token (op.CanGetPrivateClaimsFromRequest).
+// The gateway issues opaque Bearer access tokens today, so this is only reached
+// if a client switches to JWT access tokens; it keeps both token kinds on the
+// same stored-claims source.
+func (s *Storage) GetPrivateClaimsFromRequest(ctx context.Context, request op.TokenRequest, restrictedScopes []string) (map[string]any, error) {
+	var clientID string
+	switch r := request.(type) {
+	case *AuthRequest:
+		clientID = r.GetClientID()
+	case *refreshTokenRequest:
+		clientID = r.GetClientID()
+	default:
 		return nil, nil
 	}
-	uc := cached.(*userClaims)
-
-	if len(uc.Groups) > 0 {
-		claims["groups"] = uc.Groups
-	}
-
+	claims := s.privateClaims(ctx, clientID, claimsFromRequest(request))
 	if len(claims) == 0 {
 		return nil, nil
 	}
 	return claims, nil
+}
+
+// applyStandardClaims sets the OIDC standard claims the requested scopes
+// unlock. The email claim is set ONLY when Cognito supplied an address — the
+// subject is never substituted for it, so a relying party that keys accounts on
+// `email` cannot be handed an opaque sub masquerading as an address.
+func applyStandardClaims(ui *oidc.UserInfo, c SubjectClaims, scopes []string) {
+	for _, scope := range scopes {
+		switch scope {
+		case oidc.ScopeEmail:
+			if c.Email != "" {
+				ui.Email = c.Email
+			}
+			// email_verified reflects Cognito's real claim, never a hard-coded
+			// true; it stays false when the address is absent or unverified.
+			ui.EmailVerified = oidc.Bool(c.EmailVerified)
+		case oidc.ScopeProfile:
+			if c.GivenName != "" {
+				ui.GivenName = c.GivenName
+			}
+			if c.FamilyName != "" {
+				ui.FamilyName = c.FamilyName
+			}
+			if name := c.fullName(); name != "" {
+				ui.Name = name
+			}
+			if c.Email != "" {
+				ui.PreferredUsername = c.Email
+			}
+		}
+	}
+}
+
+// applyPrivateClaims appends the non-standard claims — the raw Cognito groups
+// as `groups` and the application's claim/role mappings — to the userinfo
+// (and, through zitadel's SetUserInfo, to the ID token).
+func (s *Storage) applyPrivateClaims(ctx context.Context, ui *oidc.UserInfo, clientID string, c SubjectClaims) {
+	for k, v := range s.privateClaims(ctx, clientID, c) {
+		ui.AppendClaims(k, v)
+	}
+}
+
+// privateClaims resolves the private claim set for a client: the Cognito
+// `groups` (when any) plus the per-app claim mappings. Mapping-store failures
+// are logged and skipped — the token is still issued with its standard claims —
+// so a transient config-table error does not take the token endpoint down.
+func (s *Storage) privateClaims(ctx context.Context, clientID string, c SubjectClaims) map[string]any {
+	claims := make(map[string]any)
+	if len(c.Groups) > 0 {
+		claims["groups"] = c.Groups
+	}
+	for k, v := range s.mappedClaims(ctx, clientID, c) {
+		claims[k] = v
+	}
+	return claims
+}
+
+// reservedClaimNames are the claim names a per-app mapping may not target: the
+// JWT/ID-token header claims zitadel sets itself and the standard profile/email
+// claims applyStandardClaims owns. Letting an administrator map onto one of
+// these would let a custom attribute overwrite, say, `sub` or `email_verified`
+// in the ID token. Such mappings are skipped with a warning.
+var reservedClaimNames = map[string]struct{}{
+	"sub": {}, "iss": {}, "aud": {}, "exp": {}, "iat": {}, "nbf": {}, "nonce": {},
+	"at_hash": {}, "c_hash": {}, "azp": {}, "auth_time": {}, "amr": {}, "acr": {},
+	"email": {}, "email_verified": {}, "name": {}, "given_name": {}, "family_name": {},
+	"preferred_username": {},
+}
+
+// mappedClaims evaluates the client's claim and role mappings against the
+// subject's claims, mirroring the SAML CustomAssertionMaker: a `cognito` /
+// `attribute` mapping resolves a Cognito field or custom attribute, a
+// `groupMapping` yields the role values mapped from the user's groups, and a
+// `static` mapping emits its DefaultValue. The tenant comes from the request
+// issuer (the token and userinfo endpoints both run behind the
+// IssuerInterceptor) because mappings are per-app within a tenant.
+func (s *Storage) mappedClaims(ctx context.Context, clientID string, c SubjectClaims) map[string]any {
+	if s.claimStore == nil || clientID == "" {
+		return nil
+	}
+	tenantSlug := tenantSlugFromIssuer(op.IssuerFromContext(ctx))
+
+	claimMappings, err := s.claimStore.GetClaimMappings(ctx, tenantSlug, clientID)
+	if err != nil {
+		slog.Warn("oidc claims: cannot load claim mappings; emitting none",
+			"error", err, "clientId", clientID, "tenant", tenantSlug)
+		return nil
+	}
+	if len(claimMappings) == 0 {
+		return nil
+	}
+
+	roleMap := make(map[string]string)
+	roleMappings, err := s.claimStore.GetRoleMappings(ctx, tenantSlug, clientID)
+	if err != nil {
+		slog.Warn("oidc claims: cannot load role mappings; group mappings emit nothing",
+			"error", err, "clientId", clientID, "tenant", tenantSlug)
+	}
+	for _, rm := range roleMappings {
+		roleMap[rm.CognitoGroup] = rm.MappedValue
+	}
+
+	out := make(map[string]any)
+	for _, cm := range claimMappings {
+		if cm.TargetAttribute == "" {
+			continue
+		}
+		if _, reserved := reservedClaimNames[cm.TargetAttribute]; reserved {
+			slog.Warn("oidc claims: mapping targets a reserved claim; skipped",
+				"target", cm.TargetAttribute, "mapping", cm.Name, "clientId", clientID, "tenant", tenantSlug)
+			continue
+		}
+
+		var value any
+		switch {
+		case tenant.IsCognitoSource(cm.SourceType):
+			val := resolveSubjectField(c, cm.SourceAttribute)
+			if val == "" && cm.DefaultValue != "" {
+				val = cm.DefaultValue
+			}
+			if val != "" {
+				value = val
+			}
+		case cm.SourceType == "groupMapping":
+			var mapped []string
+			for _, group := range c.Groups {
+				if v, ok := roleMap[group]; ok {
+					mapped = append(mapped, v)
+				}
+			}
+			if len(mapped) > 0 {
+				value = mapped
+			}
+		case cm.SourceType == "static":
+			if cm.DefaultValue != "" {
+				value = cm.DefaultValue
+			}
+		}
+
+		if value != nil {
+			out[cm.TargetAttribute] = value
+		}
+	}
+	return out
+}
+
+// resolveSubjectField maps a Cognito source attribute name to the matching
+// SubjectClaims field, falling back to the custom attributes (stored without
+// their `custom:` prefix, as cognito.ExtractClaims strips it).
+func resolveSubjectField(c SubjectClaims, source string) string {
+	switch source {
+	case "email":
+		return c.Email
+	case "given_name":
+		return c.GivenName
+	case "family_name":
+		return c.FamilyName
+	case "name", "common_name":
+		return c.fullName()
+	case "sub", "username":
+		// The SAML session maker sets UserName to the subject as well.
+		return c.Sub
+	default:
+		return c.CustomAttributes[strings.TrimPrefix(source, "custom:")]
+	}
 }
 
 // GetKeyByIDAndClientID returns a JWK by key ID and client ID (for JWT profile grant).

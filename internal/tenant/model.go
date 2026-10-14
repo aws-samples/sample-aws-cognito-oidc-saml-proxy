@@ -8,17 +8,21 @@ import (
 
 // Tenant represents a customer organization in the multi-tenant system.
 type Tenant struct {
-	Slug             string    `dynamo:"slug" json:"slug"`
-	DisplayName      string    `dynamo:"displayName" json:"displayName"`
-	Plan             string    `dynamo:"plan" json:"plan"`
-	Domain           string    `dynamo:"domain,omitempty" json:"domain,omitempty"`
-	Status           string    `dynamo:"status" json:"status"`
-	MaxApps          int       `dynamo:"maxApps" json:"maxApps"`
-	MaxAuthsPerMonth int       `dynamo:"maxAuthsPerMonth" json:"maxAuthsPerMonth"`
-	KMSKeyID         string    `dynamo:"kmsKeyId,omitempty" json:"kmsKeyId,omitempty"`
-	KMSKeyArn        string    `dynamo:"kmsKeyArn,omitempty" json:"kmsKeyArn,omitempty"`
-	CreatedAt        time.Time `dynamo:"createdAt" json:"createdAt"`
-	UpdatedAt        time.Time `dynamo:"updatedAt" json:"updatedAt"`
+	Slug             string `dynamo:"slug" json:"slug"`
+	DisplayName      string `dynamo:"displayName" json:"displayName"`
+	Plan             string `dynamo:"plan" json:"plan"`
+	Domain           string `dynamo:"domain,omitempty" json:"domain,omitempty"`
+	Status           string `dynamo:"status" json:"status"`
+	MaxApps          int    `dynamo:"maxApps" json:"maxApps"`
+	MaxAuthsPerMonth int    `dynamo:"maxAuthsPerMonth" json:"maxAuthsPerMonth"`
+	// KMSKeyID and KMSKeyArn are legacy fields from a never-shipped per-tenant
+	// signing-key feature. Nothing reads them: every tenant signs with the
+	// single gateway KMS key (plus the optional backup key during rotation), and
+	// the management API refuses a request that sets either (422).
+	KMSKeyID  string    `dynamo:"kmsKeyId,omitempty" json:"kmsKeyId,omitempty"`
+	KMSKeyArn string    `dynamo:"kmsKeyArn,omitempty" json:"kmsKeyArn,omitempty"`
+	CreatedAt time.Time `dynamo:"createdAt" json:"createdAt"`
+	UpdatedAt time.Time `dynamo:"updatedAt" json:"updatedAt"`
 
 	// SAML defaults (applied when creating apps that don't override)
 	DefaultSessionDurationSec int    `dynamo:"defaultSessionDurationSec" json:"defaultSessionDurationSec"`
@@ -137,6 +141,66 @@ func (a *Application) IsTrustedLoginRedirect(candidate string) bool {
 	return false
 }
 
+// IsTrustedBrowserOrigin reports whether origin — the value of a browser's
+// Origin header, "scheme://host[:port]" — is one of the origins this app's
+// custom login page or trusted login redirect targets are served from. It is
+// the anti-CSRF gate for browser form posts to the IdP-initiated SSO endpoint
+// (finding M-4): a cross-site page can make a user's browser POST an id_token,
+// but it cannot forge the Origin header, so only the pages an admin has
+// explicitly allow-listed may launch IdP-initiated SSO from a form.
+//
+// Matching is an exact scheme + host + port comparison (case-insensitive on
+// scheme and host) against the origin component of CustomLoginURL and every
+// TrustedLoginRedirectURIs entry; paths are ignored because Origin never
+// carries one. Anything that is not an https origin, that has a path, query,
+// fragment or userinfo, or that has no host, is rejected. An empty origin or
+// an app with no login-page URLs trusts nothing.
+func (a *Application) IsTrustedBrowserOrigin(origin string) bool {
+	oScheme, oHost, ok := parseOrigin(strings.TrimSpace(origin))
+	if !ok {
+		return false
+	}
+	candidates := make([]string, 0, len(a.TrustedLoginRedirectURIs)+1)
+	if u := strings.TrimSpace(a.CustomLoginURL); u != "" {
+		candidates = append(candidates, u)
+	}
+	candidates = append(candidates, a.TrustedLoginRedirectURIs...)
+	for _, raw := range candidates {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		au, err := url.Parse(raw)
+		if err != nil || au.User != nil || au.Host == "" || !strings.EqualFold(au.Scheme, "https") {
+			continue
+		}
+		if strings.EqualFold(au.Scheme, oScheme) && strings.EqualFold(au.Host, oHost) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseOrigin splits a serialised origin into its scheme and host[:port]. It
+// accepts only the exact "https://host[:port]" shape — no path (a bare "/" is
+// tolerated because some clients serialise it), query, fragment or userinfo.
+func parseOrigin(origin string) (scheme, host string, ok bool) {
+	if origin == "" {
+		return "", "", false
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.User != nil || u.Host == "" || u.Opaque != "" {
+		return "", "", false
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return "", "", false
+	}
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", "", false
+	}
+	return u.Scheme, u.Host, true
+}
+
 // pathWithinBoundary reports whether candidate path p is equal to the allowed
 // path a, or extends it at a "/" segment boundary. This prevents
 // "/appfoo" from matching an allow-listed "/app" while still allowing
@@ -155,27 +219,64 @@ func pathWithinBoundary(p, a string) bool {
 	return strings.HasPrefix(p, base+"/")
 }
 
+// Bounds for the timing fields on SAMLConfig and OIDCConfig. The management
+// API refuses values outside these ranges with 422 (0 means "use the default");
+// the protocol paths clamp anyway so a record written by an older API or
+// imported directly can never yield a zero-length or multi-day session/token
+// (appsec finding M-8).
+const (
+	// SessionDurationMinSec / SessionDurationMaxSec bound SAMLConfig.SessionDurationSec.
+	SessionDurationMinSec = 300
+	SessionDurationMaxSec = 86400
+	// ClockSkewMinSec / ClockSkewMaxSec bound SAMLConfig.ClockSkewSec.
+	ClockSkewMinSec = 0
+	ClockSkewMaxSec = 600
+	// TokenLifetimeMinSec / TokenLifetimeMaxSec bound OIDCConfig.IDTokenLifetimeSec
+	// and OIDCConfig.AccessTokenLifetimeSec.
+	TokenLifetimeMinSec = 60
+	TokenLifetimeMaxSec = 86400
+)
+
 // SAMLConfig contains SAML-specific configuration for an application.
 type SAMLConfig struct {
-	EntityID                string   `dynamo:"entityId" json:"entityId"`
-	AcsURL                  string   `dynamo:"acsUrl" json:"acsUrl"`
-	AcsURLs                 []string `dynamo:"acsUrls" json:"acsUrls"`
-	MetadataURL             string   `dynamo:"metadataUrl,omitempty" json:"metadataUrl,omitempty"`
-	SigningCertPem          string   `dynamo:"signingCertPem,omitempty" json:"-"`
-	EncryptionCertPem       string   `dynamo:"encryptionCertPem,omitempty" json:"-"`
-	NameIDFormat            string   `dynamo:"nameIdFormat" json:"nameIdFormat"`
-	NameIDSource            string   `dynamo:"nameIdSource" json:"nameIdSource"`
-	SignResponse            bool     `dynamo:"signResponse" json:"signResponse"`
-	SignAssertion           bool     `dynamo:"signAssertion" json:"signAssertion"`
-	EncryptAssertion        bool     `dynamo:"encryptAssertion" json:"encryptAssertion"`
-	WantAuthnRequestsSigned bool     `dynamo:"wantAuthnRequestsSigned" json:"wantAuthnRequestsSigned"`
+	EntityID          string   `dynamo:"entityId" json:"entityId"`
+	AcsURL            string   `dynamo:"acsUrl" json:"acsUrl"`
+	AcsURLs           []string `dynamo:"acsUrls" json:"acsUrls"`
+	MetadataURL       string   `dynamo:"metadataUrl,omitempty" json:"metadataUrl,omitempty"`
+	SigningCertPem    string   `dynamo:"signingCertPem,omitempty" json:"-"`
+	EncryptionCertPem string   `dynamo:"encryptionCertPem,omitempty" json:"-"`
+	NameIDFormat      string   `dynamo:"nameIdFormat" json:"nameIdFormat"`
+	NameIDSource      string   `dynamo:"nameIdSource" json:"nameIdSource"`
+	// SignResponse and SignAssertion are always true: the gateway signs both the
+	// SAML response and the assertion (RSA-SHA256 via KMS) and the API refuses
+	// an attempt to set either to false. They remain as fields so the stored
+	// record states the behaviour explicitly.
+	SignResponse  bool `dynamo:"signResponse" json:"signResponse"`
+	SignAssertion bool `dynamo:"signAssertion" json:"signAssertion"`
+	// EncryptAssertion controls whether the SP's encryption certificate
+	// (EncryptionCertPem, imported from its metadata) is advertised to the IdP
+	// engine, which encrypts the assertion whenever one is present. The API
+	// refuses true without a stored certificate; false means the stored
+	// certificate is ignored and the assertion is sent signed but in clear.
+	EncryptAssertion bool `dynamo:"encryptAssertion" json:"encryptAssertion"`
+	// WantAuthnRequestsSigned is stored for import fidelity only. It is not
+	// settable via the API and NOT honoured — AuthnRequest signature
+	// verification is not implemented — so the SSO path refuses an SP with it
+	// set (SPProvider fails closed) rather than pretend requests are verified.
+	WantAuthnRequestsSigned bool `dynamo:"wantAuthnRequestsSigned" json:"wantAuthnRequestsSigned"`
 	// AllowIDPInitiated permits unsolicited (IdP-initiated) SSO into this SP via
 	// the gateway's /saml/idp-initiate endpoint. Disabled by default — it is an
 	// opt-in because IdP-initiated SSO is a known abuse/phishing vector.
-	AllowIDPInitiated  bool   `dynamo:"allowIdpInitiated" json:"allowIdpInitiated"`
-	SloURL             string `dynamo:"sloUrl,omitempty" json:"sloUrl,omitempty"`
-	SessionDurationSec int    `dynamo:"sessionDurationSec" json:"sessionDurationSec"`
-	ClockSkewSec       int    `dynamo:"clockSkewSec" json:"clockSkewSec"`
+	AllowIDPInitiated bool   `dynamo:"allowIdpInitiated" json:"allowIdpInitiated"`
+	SloURL            string `dynamo:"sloUrl,omitempty" json:"sloUrl,omitempty"`
+	// SessionDurationSec is the SAML session lifetime (saml_session cookie and
+	// the assertion's SessionNotOnOrAfter), bounded by SessionDurationMinSec /
+	// SessionDurationMaxSec; 0 means the gateway default (8h).
+	SessionDurationSec int `dynamo:"sessionDurationSec" json:"sessionDurationSec"`
+	// ClockSkewSec is the allowance subtracted from the assertion's
+	// Conditions.NotBefore, bounded by ClockSkewMinSec / ClockSkewMaxSec; 0
+	// means the gateway default (180s).
+	ClockSkewSec int `dynamo:"clockSkewSec" json:"clockSkewSec"`
 	// AllowInsecureSHA1 opts this SP into accepting SHA-1 redirect-binding
 	// signature algorithms (rsa-sha1 / ecdsa-sha1). SHA-1 is collision-feasible
 	// and disabled by default; enable only for a legacy SP that cannot sign with
@@ -187,6 +288,19 @@ type SAMLConfig struct {
 	// via a direct DynamoDB management operation or a future operator-only
 	// management endpoint. Do NOT add it to SAMLConfigInput.
 	AllowInsecureSHA1 bool `dynamo:"allowInsecureSha1,omitempty" json:"allowInsecureSha1,omitempty"`
+}
+
+// IsCognitoSource reports whether a ClaimMapping.SourceType selects a value
+// from the user's Cognito claims. "cognito" is the canonical value; "attribute"
+// is the alias the registration wizard writes (see api.toClaimMappings) and
+// must resolve identically, otherwise wizard-created mappings silently release
+// nothing. Both the SAML assertion maker and the mapping preview use this.
+func IsCognitoSource(sourceType string) bool {
+	switch sourceType {
+	case "cognito", "attribute":
+		return true
+	}
+	return false
 }
 
 // ClaimMapping defines how to transform Cognito JWT claims to SAML attributes.
@@ -214,8 +328,10 @@ type OIDCConfig struct {
 	ResponseTypes           []string `dynamo:"responseTypes" json:"responseTypes"`
 	Scopes                  []string `dynamo:"scopes" json:"scopes"`
 	TokenEndpointAuthMethod string   `dynamo:"tokenEndpointAuthMethod" json:"tokenEndpointAuthMethod"`
-	IDTokenLifetimeSec      int      `dynamo:"idTokenLifetimeSec" json:"idTokenLifetimeSec"`
-	AccessTokenLifetimeSec  int      `dynamo:"accessTokenLifetimeSec" json:"accessTokenLifetimeSec"`
+	// IDTokenLifetimeSec and AccessTokenLifetimeSec are bounded by
+	// TokenLifetimeMinSec / TokenLifetimeMaxSec; 0 means the gateway default (1h).
+	IDTokenLifetimeSec     int `dynamo:"idTokenLifetimeSec" json:"idTokenLifetimeSec"`
+	AccessTokenLifetimeSec int `dynamo:"accessTokenLifetimeSec" json:"accessTokenLifetimeSec"`
 	// RefreshTokenLifetimeSec bounds how long a refresh token remains valid.
 	// Only relevant when GrantTypes includes "refresh_token" and the client
 	// requests the "offline_access" scope. Zero falls back to the gateway

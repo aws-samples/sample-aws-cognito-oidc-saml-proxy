@@ -99,7 +99,20 @@ Each capability is an independent ARM64 container Lambda, invoked by API Gateway
 - **KMS — backup signing (optional)** — optional secondary signing key for rotation
   or key-backup scenarios.
 - **KMS — encryption (symmetric)** — symmetric key for server-side encryption of the
-  DynamoDB config table and other data at rest.
+  DynamoDB config table, the Secrets Manager secrets below, and other data at rest.
+
+### Shared secrets (Secrets Manager)
+
+Each Lambda fetches the secrets it needs once at cold start; only the secret ARN is
+placed in the function environment, never the value.
+
+- **Edge secret** — the CloudFront origin-verify token every request-handling function
+  checks so the API is only reachable through CloudFront.
+- **OIDC crypto key** — 32-byte AES-GCM key for opaque bearer tokens, shared by
+  `oidc-authorize`, `oidc-token` and `oidc-discovery`.
+- **Cookie key** — 32-byte root key for the signed and encrypted login cookies, shared
+  by `saml-sso` and `oidc-authorize` so a cookie minted by one instance is readable by
+  every other instance.
 
 ### Observability & ops
 

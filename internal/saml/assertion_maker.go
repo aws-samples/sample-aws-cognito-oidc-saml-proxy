@@ -1,15 +1,22 @@
 package saml
 
 import (
+	"log/slog"
+
 	"github.com/crewjam/saml"
 	"github.com/go-chi/chi/v5"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/store"
+	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/tenant"
 )
 
 // CustomAssertionMaker implements saml.AssertionMaker with per-application
-// attribute mapping. It delegates to DefaultAssertionMaker for the base
-// assertion, then appends custom attributes based on the app's configured
-// claim and role mappings from the multi-tenant ClaimStore.
+// attribute mapping. It delegates to DefaultAssertionMaker for the Subject,
+// Conditions and AuthnStatement, then REPLACES the AttributeStatement with
+// exactly the attributes the app's claim and role mappings release. Nothing
+// else about the user is disclosed to an SP (finding M-7): no crewjam default
+// attributes (uid/eduPersonPrincipalName/mail/givenName/sn/eduPersonAffiliation/
+// subject-id), no raw Cognito groups and no custom:* attributes unless an
+// administrator mapped them for that application.
 type CustomAssertionMaker struct {
 	appStore   *store.AppStore
 	claimStore *store.ClaimStore
@@ -24,8 +31,13 @@ func NewAssertionMaker(appStore *store.AppStore, claimStore *store.ClaimStore) *
 }
 
 // MakeAssertion builds the SAML assertion. It first calls the default maker
-// (when the assertion is not yet populated), then enriches it with per-app
-// attribute mappings from the claim store.
+// (when the assertion is not yet populated), then discards whatever
+// AttributeStatement that produced and attaches one built exclusively from the
+// app's claim/role mappings — or none at all when nothing is mapped or the app
+// cannot be resolved. It also applies the SP's timing configuration (finding
+// M-8): Conditions.NotBefore honours ClockSkewSec and every AuthnStatement
+// carries SessionNotOnOrAfter equal to the session expiry, which in turn
+// honours SessionDurationSec.
 func (m *CustomAssertionMaker) MakeAssertion(req *saml.IdpAuthnRequest, session *saml.Session) error {
 	// Build the base assertion using the library default, unless the caller
 	// has already provided one (e.g. in tests).
@@ -35,39 +47,92 @@ func (m *CustomAssertionMaker) MakeAssertion(req *saml.IdpAuthnRequest, session 
 		}
 	}
 
-	entityID := req.ServiceProviderMetadata.EntityID
+	tenantSlug, app, samlCfg := m.resolveApp(req)
 
-	// Resolve the tenant from the request path (/t/{tenant}/...). The custom
-	// attribute mappings are per-app within a tenant, and a SAML entityID is
-	// unique only within a tenant, so the lookup must be tenant-scoped. Without
-	// a tenant we cannot safely resolve the app, so skip enrichment and return
-	// the already-valid base assertion rather than risk resolving another
-	// tenant's app.
+	applyTimingConfig(req, session, samlCfg)
+
+	// Only mapped attributes are ever released. Drop the default maker's
+	// statement (and any pre-populated one) before deciding what to add.
+	req.Assertion.AttributeStatements = nil
+
+	var attrs []saml.Attribute
+	if app != nil {
+		attrs = m.mappedAttributes(req, session, tenantSlug, app)
+	}
+	if len(attrs) > 0 {
+		req.Assertion.AttributeStatements = []saml.AttributeStatement{{Attributes: attrs}}
+	}
+	return nil
+}
+
+// applyTimingConfig post-adjusts the default maker's validity window with the
+// SP's bounded timing settings. cfg may be nil (defaults apply). Fields the
+// caller did not populate (tests hand in a bare Assertion) are left alone.
+func applyTimingConfig(req *saml.IdpAuthnRequest, session *saml.Session, cfg *tenant.SAMLConfig) {
+	if req.Assertion.Conditions != nil && !req.Now.IsZero() {
+		notBefore := req.Now.Add(-clockSkew(cfg))
+		// Never predate the SP's own request (same rule as the default maker).
+		if notBefore.Before(req.Request.IssueInstant) {
+			notBefore = req.Request.IssueInstant
+		}
+		req.Assertion.Conditions.NotBefore = notBefore
+	}
+	if session != nil && !session.ExpireTime.IsZero() {
+		for i := range req.Assertion.AuthnStatements {
+			expiry := session.ExpireTime
+			req.Assertion.AuthnStatements[i].SessionNotOnOrAfter = &expiry
+		}
+	}
+}
+
+// resolveApp resolves the SP's application and SAML config, tenant-scoped from
+// the request path (/t/{tenant}/...). A SAML entityID is unique only within a
+// tenant, so without a tenant on the request nothing is resolved (nil app) —
+// callers then release no attributes and fall back to default timing rather
+// than risk resolving another tenant's app.
+func (m *CustomAssertionMaker) resolveApp(req *saml.IdpAuthnRequest) (string, *tenant.Application, *tenant.SAMLConfig) {
+	var entityID string
+	if req.ServiceProviderMetadata != nil {
+		entityID = req.ServiceProviderMetadata.EntityID
+	}
+
 	if req.HTTPRequest == nil {
-		return nil
+		slog.Warn("assertion: no HTTP request in context; releasing no attributes", "entityID", entityID)
+		return "", nil, nil
 	}
 	tenantSlug := chi.URLParam(req.HTTPRequest, "tenant")
 	if tenantSlug == "" {
-		return nil
+		slog.Warn("assertion: no tenant on request path; releasing no attributes", "entityID", entityID)
+		return "", nil, nil
 	}
-	ctx := req.HTTPRequest.Context()
 
-	// Look up the app within this tenant to get its ID for querying mappings.
-	app, _, err := m.appStore.GetByTenantEntityID(ctx, tenantSlug, entityID)
+	app, samlCfg, err := m.appStore.GetByTenantEntityID(req.HTTPRequest.Context(), tenantSlug, entityID)
 	if err != nil {
-		// If we can't find the app, skip custom attributes -- the base assertion
-		// is already valid.
-		return nil
+		slog.Warn("assertion: cannot resolve application; releasing no attributes",
+			"error", err, "entityID", entityID, "tenant", tenantSlug)
+		return tenantSlug, nil, nil
 	}
+	return tenantSlug, app, samlCfg
+}
+
+// mappedAttributes loads the app's claim/role mappings and evaluates them
+// against the session. It returns nil — i.e. release nothing — when the
+// mappings cannot be loaded; it never falls back to the crewjam defaults.
+func (m *CustomAssertionMaker) mappedAttributes(req *saml.IdpAuthnRequest, session *saml.Session, tenantSlug string, app *tenant.Application) []saml.Attribute {
+	ctx := req.HTTPRequest.Context()
 
 	claimMappings, err := m.claimStore.GetClaimMappings(ctx, tenantSlug, app.ID)
 	if err != nil {
-		return nil // non-fatal: proceed with base assertion
+		slog.Warn("assertion: cannot load claim mappings; releasing no attributes",
+			"error", err, "appID", app.ID, "tenant", tenantSlug)
+		return nil
 	}
 
 	roleMappings, err := m.claimStore.GetRoleMappings(ctx, tenantSlug, app.ID)
 	if err != nil {
-		return nil // non-fatal
+		slog.Warn("assertion: cannot load role mappings; releasing no attributes",
+			"error", err, "appID", app.ID, "tenant", tenantSlug)
+		return nil
 	}
 
 	// Build a role lookup map: cognitoGroup -> mappedValue.
@@ -91,8 +156,8 @@ func (m *CustomAssertionMaker) MakeAssertion(req *saml.IdpAuthnRequest, session 
 			NameFormat: nameFormatOrDefault(""),
 		}
 
-		switch cm.SourceType {
-		case "cognito":
+		switch {
+		case tenant.IsCognitoSource(cm.SourceType):
 			val := resolveSessionField(session, cm.SourceAttribute, sessionCustom)
 			if val == "" && cm.DefaultValue != "" {
 				val = cm.DefaultValue
@@ -104,7 +169,7 @@ func (m *CustomAssertionMaker) MakeAssertion(req *saml.IdpAuthnRequest, session 
 				}}
 			}
 
-		case "groupMapping":
+		case cm.SourceType == "groupMapping":
 			var values []saml.AttributeValue
 			for _, group := range session.Groups {
 				if mapped, ok := roleMap[group]; ok {
@@ -118,7 +183,7 @@ func (m *CustomAssertionMaker) MakeAssertion(req *saml.IdpAuthnRequest, session 
 				attr.Values = values
 			}
 
-		case "static":
+		case cm.SourceType == "static":
 			if cm.DefaultValue != "" {
 				attr.Values = []saml.AttributeValue{{
 					Type:  "xs:string",
@@ -132,17 +197,7 @@ func (m *CustomAssertionMaker) MakeAssertion(req *saml.IdpAuthnRequest, session 
 		}
 	}
 
-	if len(attrs) > 0 {
-		if len(req.Assertion.AttributeStatements) == 0 {
-			req.Assertion.AttributeStatements = []saml.AttributeStatement{{}}
-		}
-		req.Assertion.AttributeStatements[0].Attributes = append(
-			req.Assertion.AttributeStatements[0].Attributes,
-			attrs...,
-		)
-	}
-
-	return nil
+	return attrs
 }
 
 // resolveSessionField maps a Cognito source attribute name to the corresponding

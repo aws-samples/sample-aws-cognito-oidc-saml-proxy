@@ -33,9 +33,11 @@ func issueRefreshToken(t *testing.T, s *Storage, clientID string) (accessToken, 
 	ar.IsDone = true
 	ar.AuthTime = time.Now()
 	ar.CognitoEmail = "user@example.com"
+	ar.CognitoEmailVerified = true
 	ar.CognitoGivenName = "Ada"
 	ar.CognitoFamilyName = "Lovelace"
 	ar.CognitoGroups = []string{"engineers"}
+	ar.CognitoCustomAttributes = map[string]string{"department": "maths"}
 
 	accessToken, refreshToken, _, err = s.CreateAccessAndRefreshTokens(ctx, ar, "")
 	require.NoError(t, err)
@@ -45,50 +47,67 @@ func issueRefreshToken(t *testing.T, s *Storage, clientID string) (accessToken, 
 }
 
 func TestRefreshToken_IssueAndResolve(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	_, refreshToken := issueRefreshToken(t, s, "client-abc")
+	_, refreshToken := issueRefreshToken(t, s, clientID)
 
 	rr, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
 	require.NoError(t, err)
-	assert.Equal(t, "client-abc", rr.GetClientID())
+	assert.Equal(t, clientID, rr.GetClientID())
 	assert.Equal(t, "user@example.com", rr.GetSubject())
-	assert.Equal(t, []string{"client-abc"}, rr.GetAudience())
+	assert.Equal(t, []string{clientID}, rr.GetAudience())
 	assert.Contains(t, rr.GetScopes(), "offline_access")
 	assert.False(t, rr.GetAuthTime().IsZero())
 }
 
 func TestRefreshToken_PreservesCognitoClaims(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	accessToken, refreshToken := issueRefreshToken(t, s, "client-abc")
+	accessToken, refreshToken := issueRefreshToken(t, s, clientID)
 
-	// Simulate a fresh Lambda invocation with an empty in-memory cache.
-	s.userClaims.Range(func(k, _ any) bool {
-		s.userClaims.Delete(k)
-		return true
-	})
-
-	// Resolving the refresh token must repopulate the claims cache so the
-	// re-issued ID token / userinfo stays fully populated.
-	_, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
+	// The refresh request rebuilt from the stored item carries the full claim
+	// set, so the re-issued ID token is populated without any process state.
+	rr, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
 	require.NoError(t, err)
+	rtr := rr.(*refreshTokenRequest)
+	assert.Equal(t, SubjectClaims{
+		Sub:              "user@example.com",
+		Email:            "user@example.com",
+		EmailVerified:    true,
+		GivenName:        "Ada",
+		FamilyName:       "Lovelace",
+		Groups:           []string{"engineers"},
+		CustomAttributes: map[string]string{"department": "maths"},
+	}, rtr.claims)
 
-	// userinfo is served against the live access token minted above.
+	idTokenInfo := new(oidc.UserInfo)
+	require.NoError(t, s.SetUserinfoFromRequest(ctx, idTokenInfo, rtr, rr.GetScopes()))
+	assert.Equal(t, "user@example.com", idTokenInfo.Email)
+	assert.True(t, bool(idTokenInfo.EmailVerified))
+	assert.Equal(t, "Ada", idTokenInfo.GivenName)
+	assert.Equal(t, []string{"engineers"}, idTokenInfo.Claims["groups"])
+
+	// userinfo is served against the live access token minted above, from the
+	// claims persisted on that record.
 	userinfo := new(oidc.UserInfo)
 	require.NoError(t, s.SetUserinfoFromToken(ctx, userinfo, accessToken, "user@example.com", ""))
 	assert.Equal(t, "user@example.com", string(userinfo.Email))
+	assert.True(t, bool(userinfo.EmailVerified))
 	assert.Equal(t, "Ada", userinfo.GivenName)
 	assert.Equal(t, "Lovelace", userinfo.FamilyName)
+	assert.Equal(t, []string{"engineers"}, userinfo.Claims["groups"])
 }
 
 func TestRefreshToken_RotationRevokesOld(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	_, oldToken := issueRefreshToken(t, s, "client-abc")
+	_, oldToken := issueRefreshToken(t, s, clientID)
 
 	// Resolve the original request, then rotate (as the token endpoint does).
 	rr, err := s.TokenRequestByRefreshToken(ctx, oldToken)
@@ -107,32 +126,31 @@ func TestRefreshToken_RotationRevokesOld(t *testing.T) {
 	rr2, err := s.TokenRequestByRefreshToken(ctx, newToken)
 	require.NoError(t, err)
 	assert.Equal(t, "user@example.com", rr2.GetSubject())
-	assert.Equal(t, "client-abc", rr2.GetClientID())
+	assert.Equal(t, clientID, rr2.GetClientID())
 }
 
 func TestRefreshToken_RotationCarriesClaimsForward(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	_, oldToken := issueRefreshToken(t, s, "client-abc")
+	_, oldToken := issueRefreshToken(t, s, clientID)
 	rr, err := s.TokenRequestByRefreshToken(ctx, oldToken)
 	require.NoError(t, err)
 	newAccessToken, newToken, _, err := s.CreateAccessAndRefreshTokens(ctx, rr.(*refreshTokenRequest), oldToken)
 	require.NoError(t, err)
 
-	// Clear cache to prove the claims came from the persisted rotated token.
-	s.userClaims.Range(func(k, _ any) bool {
-		s.userClaims.Delete(k)
-		return true
-	})
-
-	_, err = s.TokenRequestByRefreshToken(ctx, newToken)
+	// The rotated refresh token record carries the claims forward.
+	rr2, err := s.TokenRequestByRefreshToken(ctx, newToken)
 	require.NoError(t, err)
+	assert.Equal(t, rr.(*refreshTokenRequest).claims, rr2.(*refreshTokenRequest).claims)
 
 	// userinfo is served against the live access token minted by the rotation.
 	userinfo := new(oidc.UserInfo)
 	require.NoError(t, s.SetUserinfoFromToken(ctx, userinfo, newAccessToken, "user@example.com", ""))
+	assert.Equal(t, "user@example.com", userinfo.Email)
 	assert.Equal(t, "Ada", userinfo.GivenName)
+	assert.Equal(t, []string{"engineers"}, userinfo.Claims["groups"])
 }
 
 func TestRefreshToken_Expired(t *testing.T) {
@@ -155,13 +173,14 @@ func TestRefreshToken_Expired(t *testing.T) {
 }
 
 func TestRefreshToken_GetRefreshTokenInfo(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	_, refreshToken := issueRefreshToken(t, s, "client-abc")
+	_, refreshToken := issueRefreshToken(t, s, clientID)
 
 	t.Run("valid token", func(t *testing.T) {
-		subject, tokenID, err := s.GetRefreshTokenInfo(ctx, "client-abc", refreshToken)
+		subject, tokenID, err := s.GetRefreshTokenInfo(ctx, clientID, refreshToken)
 		require.NoError(t, err)
 		assert.Equal(t, "user@example.com", subject)
 		assert.Equal(t, refreshToken, tokenID)
@@ -173,21 +192,58 @@ func TestRefreshToken_GetRefreshTokenInfo(t *testing.T) {
 	})
 
 	t.Run("unknown token", func(t *testing.T) {
-		_, _, err := s.GetRefreshTokenInfo(ctx, "client-abc", "nope")
+		_, _, err := s.GetRefreshTokenInfo(ctx, clientID, "nope")
 		assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
 	})
 }
 
 func TestRefreshToken_Revoke(t *testing.T) {
-	s, _, _, _ := newTestStorage(t)
+	s, appStore, _, _ := newTestStorage(t)
 	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
 
-	_, refreshToken := issueRefreshToken(t, s, "client-abc")
+	_, refreshToken := issueRefreshToken(t, s, clientID)
 
-	oidcErr := s.RevokeToken(ctx, refreshToken, "user@example.com", "client-abc")
+	oidcErr := s.RevokeToken(ctx, refreshToken, "user@example.com", clientID)
 	assert.Nil(t, oidcErr)
 
 	// After revocation the token is no longer resolvable.
+	_, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
+	assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
+}
+
+// TestRefreshToken_DisabledAppRejected is the M-5 regression: a refresh token
+// issued while the application was active must stop working the moment the
+// app is disabled, and the stored token must be dropped so re-enabling the app
+// does not resurrect it.
+func TestRefreshToken_DisabledAppRejected(t *testing.T) {
+	s, appStore, _, _ := newTestStorage(t)
+	ctx := context.Background()
+	clientID := seedOIDCClient(t, appStore, "test-tenant")
+
+	_, refreshToken := issueRefreshToken(t, s, clientID)
+	_, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
+	require.NoError(t, err)
+
+	require.NoError(t, appStore.SetStatus(ctx, "test-tenant", clientID, "disabled"))
+
+	_, err = s.TokenRequestByRefreshToken(ctx, refreshToken)
+	assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
+
+	// Re-enabling the app must not bring the token back.
+	require.NoError(t, appStore.SetStatus(ctx, "test-tenant", clientID, "active"))
+	_, err = s.TokenRequestByRefreshToken(ctx, refreshToken)
+	assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
+}
+
+// TestRefreshToken_DeletedAppRejected covers the sibling case where the owning
+// application no longer exists at all.
+func TestRefreshToken_DeletedAppRejected(t *testing.T) {
+	s, _, _, _ := newTestStorage(t)
+	ctx := context.Background()
+
+	_, refreshToken := issueRefreshToken(t, s, "no-such-client")
+
 	_, err := s.TokenRequestByRefreshToken(ctx, refreshToken)
 	assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
 }

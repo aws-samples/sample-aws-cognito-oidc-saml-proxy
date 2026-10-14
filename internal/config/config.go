@@ -58,9 +58,8 @@ type Config struct {
 	SessionTable  string
 
 	// KMS
-	KMSKeyID           string // RSA signing key (SIGN_VERIFY)
-	KMSKeyIDBackup     string // Optional RSA signing key for the backup signing certificate (key rolling)
-	KMSEncryptionKeyID string // Symmetric encryption key (ENCRYPT_DECRYPT) for cookie key derivation
+	KMSKeyID       string // RSA signing key (SIGN_VERIFY)
+	KMSKeyIDBackup string // Optional RSA signing key for the backup signing certificate (key rolling)
 
 	// Multi-tenant mode
 	TenantMode string // "pool" (one Cognito pool per tenant) or "group" (groups within one pool)
@@ -88,6 +87,14 @@ type Config struct {
 	// All OIDC Lambdas must share the same value (MF-5). Empty in local dev
 	// (a per-process random key is used instead).
 	OIDCCryptoKeySecretARN string // PROXY_OIDC_CRYPTO_KEY_SECRET_ARN
+
+	// CookieKeySecretARN is the Secrets Manager ARN (or name) of the 32-byte
+	// binary secret that is the root key for every signed/encrypted login
+	// cookie (saml_flow, saml_session, oidc_login, __Host- login bindings).
+	// saml-sso and oidc-authorize must share the same value so a cookie minted
+	// by one Lambda instance is readable by every other (M-3). Empty in local
+	// dev only (cmd/proxy falls back to a per-process random key there).
+	CookieKeySecretARN string // PROXY_COOKIE_KEY_SECRET_ARN
 
 	// EdgeAuthSecretARN is the Secrets Manager ARN of the CloudFront
 	// origin-verify shared secret. Each request-handling Lambda fetches the raw
@@ -117,7 +124,6 @@ func Load() (*Config, error) {
 		SessionTable:           env("PROXY_SESSION_TABLE"),
 		KMSKeyID:               env("PROXY_KMS_KEY_ID"),
 		KMSKeyIDBackup:         env("PROXY_KMS_KEY_ID_BACKUP"),
-		KMSEncryptionKeyID:     env("PROXY_KMS_ENCRYPTION_KEY_ID"),
 		TenantMode:             envOr("PROXY_TENANT_MODE", "pool"),
 		CognitoPoolID:          env("PROXY_COGNITO_POOL_ID"),
 		CognitoClientID:        env("PROXY_COGNITO_CLIENT_ID"),
@@ -128,6 +134,7 @@ func Load() (*Config, error) {
 		IaCTemplatesBucket:     env("PROXY_IAC_TEMPLATES_BUCKET"),
 		IaCTemplatesBaseURL:    env("PROXY_IAC_TEMPLATES_BASE_URL"),
 		OIDCCryptoKeySecretARN: env("PROXY_OIDC_CRYPTO_KEY_SECRET_ARN"),
+		CookieKeySecretARN:     env("PROXY_COOKIE_KEY_SECRET_ARN"),
 		EdgeAuthSecretARN:      env("PROXY_EDGE_AUTH_SECRET_ARN"),
 	}
 

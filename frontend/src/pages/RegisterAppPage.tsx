@@ -76,8 +76,8 @@ export default function RegisterAppPage() {
     value: 'urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress',
   });
   const [sessionDuration, setSessionDuration] = useState('3600');
-  const [signResponse, setSignResponse] = useState(true);
-  const [signAssertion, setSignAssertion] = useState(true);
+  // The gateway always signs both the response and the assertion; there is no
+  // toggle because the API refuses signResponse/signAssertion=false.
   const [encryptAssertion, setEncryptAssertion] = useState(false);
   const [allowIdpInitiated, setAllowIdpInitiated] = useState(false);
 
@@ -201,12 +201,14 @@ export default function RegisterAppPage() {
         payload.saml = {
           entityId,
           acsUrl,
-          signResponse,
-          signAssertion,
+          signResponse: true,
+          signAssertion: true,
           encryptAssertion,
           allowIdpInitiated,
           nameIdFormat: nameIdFormat.value,
-          nameIdSource: 'email',
+          // Only an emailAddress NameID is sourced from the (verified) email
+          // claim; persistent and transient subjects are keyed on the Cognito sub.
+          nameIdSource: nameIdFormat.value.endsWith(':emailAddress') ? 'email' : 'sub',
           sessionDurationSec: parseInt(sessionDuration, 10) || 3600,
           clockSkewSec: 60,
         };
@@ -467,7 +469,10 @@ ${claimMappings.map(m => `    <saml:Attribute Name="${m.target}">
                     </FormField>
                   )}
 
-                  <FormField label={isSAML ? 'Session duration (seconds)' : 'ID token lifetime (seconds)'}>
+                  <FormField
+                    label={isSAML ? 'Session duration (seconds)' : 'ID token lifetime (seconds)'}
+                    constraintText={isSAML ? 'Between 300 and 86400 seconds (5 minutes to 24 hours).' : 'Between 60 and 86400 seconds (1 minute to 24 hours).'}
+                  >
                     <Input
                       type="number"
                       value={isSAML ? sessionDuration : idTokenLifetime}
@@ -517,13 +522,12 @@ ${claimMappings.map(m => `    <saml:Attribute Name="${m.target}">
               {isSAML ? (
                 <Container header={<Header variant="h2">SAML Signing</Header>}>
                   <SpaceBetween size="m">
-                    <Toggle checked={signResponse} onChange={({ detail }) => setSignResponse(detail.checked)}>
-                      Sign SAML response
-                    </Toggle>
-                    <Toggle checked={signAssertion} onChange={({ detail }) => setSignAssertion(detail.checked)}>
-                      Sign SAML assertion
-                    </Toggle>
-                    <Toggle checked={encryptAssertion} onChange={({ detail }) => setEncryptAssertion(detail.checked)}>
+                    <Box variant="p">Response and assertion are always signed (RSA-SHA256 via KMS).</Box>
+                    <Toggle
+                      checked={encryptAssertion}
+                      onChange={({ detail }) => setEncryptAssertion(detail.checked)}
+                      description="Requires an SP encryption certificate imported from metadata; rejected otherwise."
+                    >
                       Encrypt SAML assertion
                     </Toggle>
                     <Toggle checked={allowIdpInitiated} onChange={({ detail }) => setAllowIdpInitiated(detail.checked)} description="Allow unsolicited IdP-initiated SSO into this app. Off by default.">
@@ -562,7 +566,7 @@ ${claimMappings.map(m => `    <saml:Attribute Name="${m.target}">
                         placeholder="https://app.example.com/"
                       />
                     </FormField>
-                    <FormField label="Access token lifetime (seconds)">
+                    <FormField label="Access token lifetime (seconds)" constraintText="Between 60 and 86400 seconds (1 minute to 24 hours).">
                       <Input
                         type="number"
                         value={accessTokenLifetime}
@@ -747,8 +751,7 @@ ${claimMappings.map(m => `    <saml:Attribute Name="${m.target}">
                               { label: 'Entity ID', value: entityId },
                               { label: 'ACS URL', value: acsUrl },
                               { label: 'NameID Format', value: nameIdFormat.label },
-                              { label: 'Sign Response', value: signResponse ? 'Yes' : 'No' },
-                              { label: 'Sign Assertion', value: signAssertion ? 'Yes' : 'No' },
+                              { label: 'Signing', value: 'Response and assertion always signed' },
                               { label: 'Encrypt Assertion', value: encryptAssertion ? 'Yes' : 'No' },
                             ]
                           : [

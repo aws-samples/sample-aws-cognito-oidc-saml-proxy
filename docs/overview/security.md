@@ -16,15 +16,34 @@ API layer, cryptographic signing, and the request-handling code.
 
 - **SAML assertions** signed with RSA-SHA256; **OIDC tokens** signed with RS256 — both
   through AWS KMS, so private keys never leave KMS.
-- **Cookie encryption** uses AES-256-GCM with HMAC-SHA256, using separately derived keys.
-- **Per-tenant KMS signing keys** are supported for tenant isolation.
+- **Cookie encryption**: login cookies are AES-256-GCM encrypted and HMAC-SHA256 signed.
+  A single 32-byte root key lives in AWS Secrets Manager and is shared by every
+  `saml-sso` and `oidc-authorize` instance; each protocol derives its own HMAC and AES
+  subkeys from it (a SAML cookie is never valid on the OIDC surface), and every cookie
+  carries a key-id prefix so a rotated or mismatched key is rejected explicitly.
+- **Single gateway signing key (KMS)** with an optional backup key for rotation. Every tenant
+  signs with it; tenant-specific signing keys are not supported and the management API rejects
+  `kmsKeyId`/`kmsKeyArn` on tenants (422).
 
 ## Request protection
 
 - **AWS WAF** with the OWASP Core Rule Set, AWS managed rule groups (Known Bad Inputs, IP
   reputation), and endpoint-specific rate limiting.
 - **CSRF protection** via OAuth2 `state` parameters and PKCE.
+- **Login-binding cookies** for custom login pages: the redirect to the page sets a
+  short-lived, signed `__Host-` cookie tied to the flow's `state`, and the hand-back to
+  `/login/complete` is only accepted from the browser that carries it, so a token cannot
+  be posted into someone else's browser to log them in as the attacker.
+- **Origin allow-list for IdP-initiated SSO**: a browser form post to
+  `/saml/idp-initiate` is only honoured from the gateway's own origin or the origin of
+  the app's custom login URL / trusted login redirect URIs; IdP-initiated launches never
+  persist a session cookie.
 - **AuthnRequest replay detection** on the SAML SSO path.
+- **Tenant and application status enforcement**: tenant status and application status are
+  enforced on every SAML and OIDC protocol endpoint, in both the deployed Lambdas and the
+  monolith. A suspended tenant answers 403 everywhere (its SAML metadata answers 404), and
+  a disabled OIDC application is refused as a client, including for refresh-token grants
+  issued before it was disabled.
 - **CloudFront origin-verify** header (an edge secret in AWS Secrets Manager) ensures the
   API is only reached through the WAF-protected CloudFront front door.
 

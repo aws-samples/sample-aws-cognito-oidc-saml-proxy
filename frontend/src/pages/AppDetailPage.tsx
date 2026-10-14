@@ -72,8 +72,8 @@ export default function AppDetailPage() {
   const [samlAcsUrl, setSamlAcsUrl] = useState('');
   const [samlNameIdFormat, setSamlNameIdFormat] = useState<{ label: string; value: string } | null>(null);
   const [samlNameIdSource, setSamlNameIdSource] = useState('');
-  const [samlSignResponse, setSamlSignResponse] = useState(false);
-  const [samlSignAssertion, setSamlSignAssertion] = useState(false);
+  // The gateway always signs both the response and the assertion; there is no
+  // toggle because the API refuses signResponse/signAssertion=false.
   const [samlEncryptAssertion, setSamlEncryptAssertion] = useState(false);
   const [samlAllowIdpInitiated, setSamlAllowIdpInitiated] = useState(false);
   const [samlSloUrl, setSamlSloUrl] = useState('');
@@ -148,8 +148,6 @@ export default function AppDetailPage() {
       setSamlEntityId(application.saml.entityId || '');
       setSamlAcsUrl(application.saml.acsUrl || '');
       setSamlNameIdSource(application.saml.nameIdSource || 'email');
-      setSamlSignResponse(application.saml.signResponse ?? false);
-      setSamlSignAssertion(application.saml.signAssertion ?? false);
       setSamlEncryptAssertion(application.saml.encryptAssertion ?? false);
       setSamlAllowIdpInitiated(application.saml.allowIdpInitiated ?? false);
       setSamlSloUrl(application.saml.sloUrl || '');
@@ -275,8 +273,8 @@ export default function AppDetailPage() {
               acsUrl: samlAcsUrl || application.saml?.acsUrl || '',
               nameIdFormat: samlNameIdFormat?.value || application.saml?.nameIdFormat || '',
               nameIdSource: samlNameIdSource || application.saml?.nameIdSource || 'email',
-              signResponse: samlSignResponse,
-              signAssertion: samlSignAssertion,
+              signResponse: true,
+              signAssertion: true,
               encryptAssertion: samlEncryptAssertion,
               allowIdpInitiated: samlAllowIdpInitiated,
               sloUrl: samlSloUrl || application.saml?.sloUrl || '',
@@ -594,28 +592,18 @@ export default function AppDetailPage() {
                       placeholder="email"
                     />
                   </FormField>
-                  <Toggle
-                    checked={samlSignResponse}
-                    onChange={({ detail }) => setSamlSignResponse(detail.checked)}
-                  >
-                    Sign Response
-                  </Toggle>
-                  <Toggle
-                    checked={samlSignAssertion}
-                    onChange={({ detail }) => setSamlSignAssertion(detail.checked)}
-                  >
-                    Sign Assertion
-                  </Toggle>
+                  <Box variant="p">Response and assertion are always signed (RSA-SHA256 via KMS).</Box>
                   <Toggle
                     checked={samlEncryptAssertion}
                     onChange={({ detail }) => setSamlEncryptAssertion(detail.checked)}
+                    description="Requires an SP encryption certificate imported from metadata; rejected otherwise."
                   >
                     Encrypt Assertion
                   </Toggle>
                   <Toggle
                     checked={samlAllowIdpInitiated}
                     onChange={({ detail }) => setSamlAllowIdpInitiated(detail.checked)}
-                    description="Allow unsolicited (IdP-initiated) SSO into this app via the gateway's /saml/idp-initiate endpoint. Off by default — IdP-initiated SSO is an opt-in because it can be an abuse vector."
+                    description="Allow unsolicited (IdP-initiated) SSO into this app via the gateway's /saml/idp-initiate endpoint. Off by default — IdP-initiated SSO is an opt-in because it can be an abuse vector. Browser form posts are only accepted from the origin of this app's custom login URL or trusted login redirect URLs, so list the launcher page there."
                   >
                     Allow IdP-initiated SSO
                   </Toggle>
@@ -626,14 +614,14 @@ export default function AppDetailPage() {
                       placeholder="https://app.example.com/saml/slo"
                     />
                   </FormField>
-                  <FormField label="Session Duration (seconds)">
+                  <FormField label="Session Duration (seconds)" constraintText="Between 300 and 86400 seconds (5 minutes to 24 hours).">
                     <Input
                       type="number"
                       value={samlSessionDuration}
                       onChange={({ detail }) => setSamlSessionDuration(detail.value)}
                     />
                   </FormField>
-                  <FormField label="Clock Skew (seconds)">
+                  <FormField label="Clock Skew (seconds)" constraintText="Between 0 and 600 seconds.">
                     <Input
                       type="number"
                       value={samlClockSkew}
@@ -725,7 +713,7 @@ export default function AppDetailPage() {
                       ]}
                     />
                   </FormField>
-                  <FormField label="ID Token Lifetime (seconds)">
+                  <FormField label="ID Token Lifetime (seconds)" constraintText="Between 60 and 86400 seconds (1 minute to 24 hours).">
                     <Input
                       type="number"
                       value={oidcIdTokenLifetime}
@@ -733,7 +721,7 @@ export default function AppDetailPage() {
                       placeholder="3600"
                     />
                   </FormField>
-                  <FormField label="Access Token Lifetime (seconds)">
+                  <FormField label="Access Token Lifetime (seconds)" constraintText="Between 60 and 86400 seconds (1 minute to 24 hours).">
                     <Input
                       type="number"
                       value={oidcAccessTokenLifetime}
@@ -806,7 +794,10 @@ export default function AppDetailPage() {
                     redirected there. Your page authenticates the user and posts the
                     Cognito ID token back to the gateway's session-establish endpoint
                     (<code>/t/&lt;tenant&gt;/{isSAML ? 'saml' : 'oidc'}/login/complete</code>)
-                    to resume SSO. Leave the URL blank to use the Cognito Hosted UI.
+                    to resume SSO. The hand-back must come from the browser the gateway
+                    redirected (a signed binding cookie set on the redirect is required), and
+                    IdP-initiated launches are only accepted from the origin of a URL listed
+                    below. Leave the URL blank to use the Cognito Hosted UI.
                   </Alert>
 
                   {loginSaveError && (

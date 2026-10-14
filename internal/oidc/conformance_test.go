@@ -7,22 +7,26 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-jose/go-jose/v4"
 	internalcrypto "github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/crypto"
+	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/domain"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/oidc"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/store"
 	"github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/internal/tenant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	zoidc "github.com/zitadel/oidc/v3/pkg/oidc"
+	"github.com/zitadel/oidc/v3/pkg/op"
 )
 
 // mockKMSClient implements crypto.KMSSignerClient for tests.
@@ -46,8 +50,17 @@ func (m *mockKMSClient) PublicKey() (*rsa.PublicKey, error) {
 	return m.publicKey, nil
 }
 
-// setupTestServer creates a test HTTP server with OIDC routes configured.
+// setupTestServer creates a test HTTP server with OIDC routes configured. The
+// tenant status gate is not wired (nil TenantReader) so the conformance tests
+// can use ad-hoc tenant slugs; see setupTestServerWithTenants for the gate.
 func setupTestServer(t *testing.T) (*httptest.Server, *store.AppStore, *store.SourceStore) {
+	t.Helper()
+	return setupTestServerWithTenants(t, nil)
+}
+
+// setupTestServerWithTenants is setupTestServer with an explicit TenantReader
+// backing middleware.TenantFromPath on the /t/{tenant}/oidc group.
+func setupTestServerWithTenants(t *testing.T, tenants domain.TenantReader) (*httptest.Server, *store.AppStore, *store.SourceStore) {
 	t.Helper()
 
 	// Create in-memory stores — separate config and session DBs
@@ -79,7 +92,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, *store.AppStore, *store.So
 	r := chi.NewRouter()
 
 	// Register OIDC routes
-	err = oidc.RegisterOIDCRoutes(r, storage, "http://localhost", appStore, sourceStore, nil, cryptoKey, hmacKey, nil, false)
+	err = oidc.RegisterOIDCRoutes(r, storage, tenants, "http://localhost", appStore, sourceStore, nil, cryptoKey, hmacKey, nil, false)
 	require.NoError(t, err)
 
 	// Create test server
@@ -398,6 +411,175 @@ func TestOIDC_TokenEndpoint(t *testing.T) {
 				"%s - Expected 4xx error, got status %d", tt.description, resp.StatusCode)
 		})
 	}
+
+	// A valid authorization_code grant (PKCE, public client) through the real
+	// zitadel/oidc endpoint must mint an ID token that carries the claims
+	// persisted at login — not a subject masquerading as the email (M-2).
+	t.Run("code grant ID token carries stored claims", func(t *testing.T) {
+		grant := exchangeCodeGrant(t)
+		idClaims := decodeJWTClaims(t, grant.IDToken)
+		assert.Equal(t, "cognito-sub-ada", idClaims["sub"])
+		assert.Equal(t, "ada@example.com", idClaims["email"], "email must be the real address, not the sub")
+		assert.Equal(t, true, idClaims["email_verified"])
+		assert.Equal(t, "Ada", idClaims["given_name"])
+		assert.Equal(t, "Lovelace", idClaims["family_name"])
+		assert.Equal(t, "Ada Lovelace", idClaims["name"])
+		assert.Equal(t, []any{"engineers", "reviewers"}, idClaims["groups"])
+		// The per-app claim mapping is applied to the ID token too.
+		assert.Equal(t, "maths", idClaims["department"])
+	})
+}
+
+// codeGrantResult is what exchangeCodeGrant hands back: the token response plus
+// the server and tenant the tokens were minted on.
+type codeGrantResult struct {
+	Server      *httptest.Server
+	TenantSlug  string
+	AccessToken string
+	IDToken     string
+}
+
+// exchangeCodeGrant runs a full authorization_code grant against a fresh test
+// server: it registers a public PKCE client with a `department` claim mapping,
+// completes an auth request (as the oidc-authorize Lambda would after Cognito
+// returns) with a rich claim set, saves a code, and exchanges it at the real
+// token endpoint with the matching code_verifier.
+func exchangeCodeGrant(t *testing.T) codeGrantResult {
+	t.Helper()
+	server, appStore, sourceStore, storage, claimStore := setupRefreshTestServer(t)
+	tenantSlug := "test-tenant"
+	clientID := createRefreshCapableApp(t, appStore, sourceStore, tenantSlug)
+	ctx := context.Background()
+
+	// A per-app claim mapping: the custom `department` attribute is released
+	// under the same name in the ID token and userinfo.
+	require.NoError(t, claimStore.PutClaimMappings(ctx, tenantSlug, clientID, []tenant.ClaimMapping{
+		{Name: "dept", SourceType: "attribute", SourceAttribute: "department", TargetAttribute: "department"},
+	}))
+
+	// RFC 7636 Appendix B test vector.
+	const (
+		codeVerifier  = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+		codeChallenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+		code          = "conformance-code-grant"
+	)
+	created, err := storage.CreateAuthRequest(ctx, &zoidc.AuthRequest{
+		ClientID:            clientID,
+		RedirectURI:         "https://app.example.com/callback",
+		Scopes:              zoidc.SpaceDelimitedArray{"openid", "email", "profile", "offline_access"},
+		ResponseType:        zoidc.ResponseTypeCode,
+		Nonce:               "n-0S6_WzA2Mj",
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: zoidc.CodeChallengeMethodS256,
+	}, "")
+	require.NoError(t, err)
+	require.NoError(t, storage.CompleteAuthRequest(ctx, created.GetID(), oidc.SubjectClaims{
+		Sub:              "cognito-sub-ada",
+		Email:            "ada@example.com",
+		EmailVerified:    true,
+		GivenName:        "Ada",
+		FamilyName:       "Lovelace",
+		Groups:           []string{"engineers", "reviewers"},
+		CustomAttributes: map[string]string{"department": "maths"},
+	}))
+	require.NoError(t, storage.SaveAuthCode(ctx, created.GetID(), code))
+
+	resp, err := http.PostForm(server.URL+"/t/"+tenantSlug+"/oidc/oauth/token", url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"redirect_uri":  {"https://app.example.com/callback"},
+		"client_id":     {clientID},
+		"code_verifier": {codeVerifier},
+	})
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "code grant should succeed: %s", string(body))
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		IDToken     string `json:"id_token"`
+	}
+	require.NoError(t, json.Unmarshal(body, &tokenResp))
+	require.NotEmpty(t, tokenResp.AccessToken)
+	require.NotEmpty(t, tokenResp.IDToken)
+
+	return codeGrantResult{Server: server, TenantSlug: tenantSlug, AccessToken: tokenResp.AccessToken, IDToken: tokenResp.IDToken}
+}
+
+// decodeJWTClaims returns the (unverified) payload claims of a compact JWS.
+// Signature verification is covered by the JWKS tests; here only the claim
+// content matters.
+func decodeJWTClaims(t *testing.T, token string) map[string]any {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3, "expected a compact JWS")
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return claims
+}
+
+// fetchUserinfo calls the userinfo endpoint with a Bearer token and returns the
+// decoded JSON body, requiring a 200.
+func fetchUserinfo(t *testing.T, userinfoURL, accessToken string) map[string]any {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, userinfoURL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "userinfo should succeed: %s", string(body))
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(body, &claims))
+	return claims
+}
+
+// TestOIDC_SuspendedTenantRejected is the M-5 regression for the OIDC mount:
+// every endpoint under /t/{tenant}/oidc of a suspended tenant must answer 403
+// from middleware.TenantFromPath before zitadel/oidc sees the request, while an
+// active tenant is unaffected.
+func TestOIDC_SuspendedTenantRejected(t *testing.T) {
+	tenantStore := store.NewTenantStore(store.NewMemoryDB(), "test")
+	ctx := context.Background()
+	require.NoError(t, tenantStore.Create(ctx, &tenant.Tenant{
+		Slug: "suspended", DisplayName: "Suspended", Plan: "free", Status: "suspended",
+	}))
+	require.NoError(t, tenantStore.Create(ctx, &tenant.Tenant{
+		Slug: "active", DisplayName: "Active", Plan: "free", Status: "active",
+	}))
+
+	server, appStore, sourceStore := setupTestServerWithTenants(t, tenantStore)
+	suspendedClient := createTestTenantAndApp(t, appStore, sourceStore, "suspended")
+	createTestTenantAndApp(t, appStore, sourceStore, "active")
+
+	// Discovery on the suspended tenant → 403.
+	resp, err := http.Get(server.URL + "/t/suspended/oidc/.well-known/openid-configuration")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	body, _ := io.ReadAll(resp.Body)
+	assert.Contains(t, string(body), "tenant suspended")
+
+	// Token endpoint on the suspended tenant → 403 (not a zitadel 400).
+	tokenResp, err := http.PostForm(server.URL+"/t/suspended/oidc/token", url.Values{
+		"grant_type":   {"authorization_code"},
+		"client_id":    {suspendedClient},
+		"code":         {"irrelevant"},
+		"redirect_uri": {"https://app.example.com/callback"},
+	})
+	require.NoError(t, err)
+	defer func() { _ = tokenResp.Body.Close() }()
+	assert.Equal(t, http.StatusForbidden, tokenResp.StatusCode)
+
+	// The active tenant still serves discovery.
+	okResp, err := http.Get(server.URL + "/t/active/oidc/.well-known/openid-configuration")
+	require.NoError(t, err)
+	defer func() { _ = okResp.Body.Close() }()
+	assert.Equal(t, http.StatusOK, okResp.StatusCode)
 }
 
 func TestOIDC_UserInfoEndpoint(t *testing.T) {
@@ -412,12 +594,28 @@ func TestOIDC_UserInfoEndpoint(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "Request without Bearer token should return 401")
+
+	// With a Bearer token from a real code grant, userinfo must serve the
+	// claims persisted on the access-token record (M-2): the real address,
+	// its verified flag, the names, the groups and the per-app mapping.
+	t.Run("bearer token serves stored claims", func(t *testing.T) {
+		grant := exchangeCodeGrant(t)
+		claims := fetchUserinfo(t, grant.Server.URL+"/t/"+grant.TenantSlug+"/oidc/userinfo", grant.AccessToken)
+		assert.Equal(t, "cognito-sub-ada", claims["sub"])
+		assert.Equal(t, "ada@example.com", claims["email"], "email must be the real address, not the sub")
+		assert.Equal(t, true, claims["email_verified"])
+		assert.Equal(t, "Ada", claims["given_name"])
+		assert.Equal(t, "Lovelace", claims["family_name"])
+		assert.Equal(t, "ada@example.com", claims["preferred_username"])
+		assert.Equal(t, []any{"engineers", "reviewers"}, claims["groups"])
+		assert.Equal(t, "maths", claims["department"])
+	})
 }
 
 // setupRefreshTestServer mirrors setupTestServer but also returns the shared
 // Storage so a test can mint tokens directly (bypassing the interactive Cognito
 // login) before exercising the token endpoint.
-func setupRefreshTestServer(t *testing.T) (*httptest.Server, *store.AppStore, *store.SourceStore, *oidc.Storage) {
+func setupRefreshTestServer(t *testing.T) (*httptest.Server, *store.AppStore, *store.SourceStore, *oidc.Storage, *store.ClaimStore) {
 	t.Helper()
 
 	configDB := store.NewMemoryDB()
@@ -442,12 +640,12 @@ func setupRefreshTestServer(t *testing.T) (*httptest.Server, *store.AppStore, *s
 	require.NoError(t, err)
 
 	r := chi.NewRouter()
-	require.NoError(t, oidc.RegisterOIDCRoutes(r, storage, "http://localhost", appStore, sourceStore, nil, cryptoKey, hmacKey, nil, false))
+	require.NoError(t, oidc.RegisterOIDCRoutes(r, storage, nil, "http://localhost", appStore, sourceStore, nil, cryptoKey, hmacKey, nil, false))
 
 	server := httptest.NewServer(r)
 	t.Cleanup(server.Close)
 
-	return server, appStore, sourceStore, storage
+	return server, appStore, sourceStore, storage, claimStore
 }
 
 // createRefreshCapableApp registers an OIDC app that holds the refresh_token
@@ -495,7 +693,7 @@ func createRefreshCapableApp(t *testing.T, appStore *store.AppStore, sourceStore
 // exchange the refresh token for a new pair, and confirm the old refresh token
 // is rejected (single-use rotation).
 func TestOIDC_RefreshTokenGrant(t *testing.T) {
-	server, appStore, sourceStore, storage := setupRefreshTestServer(t)
+	server, appStore, sourceStore, storage, _ := setupRefreshTestServer(t)
 	tenantSlug := "test-tenant"
 	clientID := createRefreshCapableApp(t, appStore, sourceStore, tenantSlug)
 
@@ -512,8 +710,10 @@ func TestOIDC_RefreshTokenGrant(t *testing.T) {
 	}
 	created, err := storage.CreateAuthRequest(ctx, authReqIn, "")
 	require.NoError(t, err)
-	require.NoError(t, storage.CompleteAuthRequest(ctx, created.GetID(), "user@example.com",
-		"user@example.com", "Ada", "Lovelace", true, []string{"engineers"}))
+	require.NoError(t, storage.CompleteAuthRequest(ctx, created.GetID(), oidc.SubjectClaims{
+		Sub: "user@example.com", Email: "user@example.com", EmailVerified: true,
+		GivenName: "Ada", FamilyName: "Lovelace", Groups: []string{"engineers"},
+	}))
 	completed, err := storage.AuthRequestByID(ctx, created.GetID())
 	require.NoError(t, err)
 
@@ -560,6 +760,20 @@ func TestOIDC_RefreshTokenGrant(t *testing.T) {
 	assert.NotEmpty(t, tokenResp.RefreshToken, "must return a rotated refresh token")
 	assert.NotEqual(t, refreshToken, tokenResp.RefreshToken, "refresh token must rotate")
 
+	// M-2: the re-issued ID token carries the claims persisted on the refresh
+	// token record — the real address, its verified flag and the groups.
+	idClaims := decodeJWTClaims(t, tokenResp.IDToken)
+	assert.Equal(t, "user@example.com", idClaims["email"])
+	assert.Equal(t, true, idClaims["email_verified"])
+	assert.Equal(t, "Ada", idClaims["given_name"])
+	assert.Equal(t, []any{"engineers"}, idClaims["groups"])
+
+	// And userinfo for the new access token reads the same claims.
+	uiClaims := fetchUserinfo(t, server.URL+"/t/"+tenantSlug+"/oidc/userinfo", tokenResp.AccessToken)
+	assert.Equal(t, "user@example.com", uiClaims["email"])
+	assert.Equal(t, true, uiClaims["email_verified"])
+	assert.Equal(t, []any{"engineers"}, uiClaims["groups"])
+
 	// The old refresh token must now be rejected (single-use rotation).
 	resp2, err := http.PostForm(tokenURL, url.Values{
 		"grant_type":    {"refresh_token"},
@@ -579,4 +793,67 @@ func TestOIDC_RefreshTokenGrant(t *testing.T) {
 	require.NoError(t, err)
 	defer resp3.Body.Close()
 	assert.Equal(t, http.StatusOK, resp3.StatusCode, "rotated refresh token must be usable")
+}
+
+// TestOIDC_RefreshTokenGrant_DisabledApp is the M-5 regression through the real
+// zitadel/oidc token endpoint: once the application is disabled, a previously
+// valid refresh token must be refused with a proper OAuth error (invalid_client,
+// since the client lookup itself fails closed) — never a new token pair.
+func TestOIDC_RefreshTokenGrant_DisabledApp(t *testing.T) {
+	server, appStore, sourceStore, storage, _ := setupRefreshTestServer(t)
+	tenantSlug := "test-tenant"
+	clientID := createRefreshCapableApp(t, appStore, sourceStore, tenantSlug)
+	ctx := context.Background()
+
+	created, err := storage.CreateAuthRequest(ctx, &zoidc.AuthRequest{
+		ClientID:     clientID,
+		RedirectURI:  "https://app.example.com/callback",
+		Scopes:       zoidc.SpaceDelimitedArray{"openid", "offline_access"},
+		ResponseType: zoidc.ResponseTypeCode,
+	}, "")
+	require.NoError(t, err)
+	require.NoError(t, storage.CompleteAuthRequest(ctx, created.GetID(), oidc.SubjectClaims{
+		Sub: "user@example.com", Email: "user@example.com", EmailVerified: true, GivenName: "Ada", FamilyName: "Lovelace",
+	}))
+	completed, err := storage.AuthRequestByID(ctx, created.GetID())
+	require.NoError(t, err)
+	_, refreshToken, _, err := storage.CreateAccessAndRefreshTokens(ctx, completed, "")
+	require.NoError(t, err)
+
+	// Resolve the token endpoint from discovery (zitadel mounts it at /oauth/token).
+	discResp, err := http.Get(server.URL + "/t/" + tenantSlug + "/oidc/.well-known/openid-configuration")
+	require.NoError(t, err)
+	defer func() { _ = discResp.Body.Close() }()
+	var disc struct {
+		TokenEndpoint string `json:"token_endpoint"`
+	}
+	require.NoError(t, json.NewDecoder(discResp.Body).Decode(&disc))
+	tokenEndpointURL, err := url.Parse(disc.TokenEndpoint)
+	require.NoError(t, err)
+
+	require.NoError(t, appStore.SetStatus(ctx, tenantSlug, clientID, "disabled"))
+
+	resp, err := http.PostForm(server.URL+tokenEndpointURL.Path, url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {clientID},
+	})
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	// zitadel resolves the client before the refresh token, so the disabled
+	// app surfaces as invalid_client (401) from GetClientByClientID; a 5xx
+	// would mean the storage error leaked through as server_error.
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "disabled app must not refresh: %s", string(body))
+	var oauthErr struct {
+		Error string `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(body, &oauthErr))
+	assert.Equal(t, "invalid_client", oauthErr.Error, string(body))
+	assert.NotContains(t, string(body), "access_token")
+
+	// The storage path alone (what oidc-token hits when the client check is
+	// somehow bypassed) also reports invalid_grant.
+	_, err = storage.TokenRequestByRefreshToken(ctx, refreshToken)
+	assert.ErrorIs(t, err, op.ErrInvalidRefreshToken)
 }

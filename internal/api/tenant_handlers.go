@@ -16,8 +16,8 @@ type CreateTenantInput struct {
 		Slug        string `json:"slug" minLength:"1" maxLength:"63" doc:"Unique tenant slug"`
 		DisplayName string `json:"displayName" minLength:"1" maxLength:"255" doc:"Human-readable tenant name"`
 		Domain      string `json:"domain,omitempty" doc:"Tenant domain"`
-		KMSKeyID    string `json:"kmsKeyId,omitempty" doc:"Custom KMS key ID for tenant-specific SAML signing (premium feature)"`
-		KMSKeyArn   string `json:"kmsKeyArn,omitempty" doc:"ARN of the custom KMS signing key"`
+		KMSKeyID    string `json:"kmsKeyId,omitempty" doc:"Not supported: per-tenant KMS signing keys are not implemented; all tenants sign with the gateway key. Any non-empty value is rejected with 422."`
+		KMSKeyArn   string `json:"kmsKeyArn,omitempty" doc:"Not supported: per-tenant KMS signing keys are not implemented; all tenants sign with the gateway key. Any non-empty value is rejected with 422."`
 
 		// SAML defaults
 		DefaultSessionDurationSec int    `json:"defaultSessionDurationSec,omitempty" doc:"Default SAML session duration in seconds"`
@@ -53,8 +53,8 @@ type UpdateTenantInput struct {
 	Body struct {
 		DisplayName string `json:"displayName,omitempty" doc:"Human-readable tenant name"`
 		Domain      string `json:"domain,omitempty" doc:"Tenant domain"`
-		KMSKeyID    string `json:"kmsKeyId,omitempty" doc:"Custom KMS key ID for tenant-specific SAML signing (premium feature)"`
-		KMSKeyArn   string `json:"kmsKeyArn,omitempty" doc:"ARN of the custom KMS signing key"`
+		KMSKeyID    string `json:"kmsKeyId,omitempty" doc:"Not supported: per-tenant KMS signing keys are not implemented; all tenants sign with the gateway key. Any non-empty value is rejected with 422."`
+		KMSKeyArn   string `json:"kmsKeyArn,omitempty" doc:"Not supported: per-tenant KMS signing keys are not implemented; all tenants sign with the gateway key. Any non-empty value is rejected with 422."`
 
 		// SAML defaults
 		DefaultSessionDurationSec int    `json:"defaultSessionDurationSec,omitempty" doc:"Default SAML session duration in seconds"`
@@ -71,10 +71,8 @@ type UpdateTenantInput struct {
 
 // RegisterTenantRoutes registers all tenant management routes. apps is used to
 // guard tenant deletion against orphaning applications; it may be nil (the
-// guard is then skipped). kmsPolicy validates any client-supplied per-tenant
-// KMS signing key so a tenant admin cannot register a malformed or
-// cross-account key reference.
-func RegisterTenantRoutes(api huma.API, tenants domain.TenantRepository, apps domain.AppReader, kmsPolicy KMSKeyPolicy) {
+// guard is then skipped).
+func RegisterTenantRoutes(api huma.API, tenants domain.TenantRepository, apps domain.AppReader) {
 	// Create tenant
 	huma.Register(api, huma.Operation{
 		OperationID: "create-tenant",
@@ -84,20 +82,17 @@ func RegisterTenantRoutes(api huma.API, tenants domain.TenantRepository, apps do
 		Description: "Creates a new tenant with default settings",
 		Tags:        []string{"Tenants"},
 	}, func(ctx context.Context, input *CreateTenantInput) (*TenantOutput, error) {
-		// Validate the optional per-tenant KMS signing key before persisting it.
-		// Storing an unvalidated client-supplied ARN is a confused-deputy vector:
-		// the gateway signs with its own IAM identity, so a foreign-account
-		// key reference must be rejected here.
-		if err := validateTenantKMSKeyRefs(input.Body.KMSKeyID, input.Body.KMSKeyArn, kmsPolicy); err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+		// M-8: per-tenant signing keys were never implemented — nothing reads
+		// these fields and every tenant signs with the gateway key. Refuse the
+		// request instead of storing a promise the gateway does not keep.
+		if input.Body.KMSKeyID != "" || input.Body.KMSKeyArn != "" {
+			return nil, huma.Error422UnprocessableEntity(errPerTenantKMSKey)
 		}
 
 		t := &tenant.Tenant{
 			Slug:             input.Body.Slug,
 			DisplayName:      input.Body.DisplayName,
 			Domain:           input.Body.Domain,
-			KMSKeyID:         input.Body.KMSKeyID,
-			KMSKeyArn:        input.Body.KMSKeyArn,
 			Plan:             "standard",
 			Status:           "active",
 			MaxApps:          10,
@@ -211,7 +206,7 @@ func RegisterTenantRoutes(api huma.API, tenants domain.TenantRepository, apps do
 		Method:      http.MethodPut,
 		Path:        "/api/v1/tenants/{slug}",
 		Summary:     "Update a tenant",
-		Description: "Updates a tenant's configuration, including per-tenant KMS signing key (premium feature)",
+		Description: "Updates a tenant's configuration and protocol defaults",
 		Tags:        []string{"Tenants"},
 	}, func(ctx context.Context, input *UpdateTenantInput) (*TenantOutput, error) {
 		// Cross-tenant IDOR guard: a caller may only mutate its own tenant unless
@@ -219,10 +214,9 @@ func RegisterTenantRoutes(api huma.API, tenants domain.TenantRepository, apps do
 		if err := requireTenantMatch(ctx, input.Slug, "update-tenant", "forbidden: cannot modify a different tenant"); err != nil {
 			return nil, err
 		}
-		// Validate any client-supplied per-tenant KMS key reference before it can
-		// overwrite the stored value (same confused-deputy defense as create).
-		if err := validateTenantKMSKeyRefs(input.Body.KMSKeyID, input.Body.KMSKeyArn, kmsPolicy); err != nil {
-			return nil, huma.Error400BadRequest(err.Error())
+		// M-8: per-tenant signing keys are not supported (see create).
+		if input.Body.KMSKeyID != "" || input.Body.KMSKeyArn != "" {
+			return nil, huma.Error422UnprocessableEntity(errPerTenantKMSKey)
 		}
 
 		existing, err := tenants.Get(ctx, input.Slug)
@@ -239,12 +233,6 @@ func RegisterTenantRoutes(api huma.API, tenants domain.TenantRepository, apps do
 		}
 		if input.Body.Domain != "" {
 			existing.Domain = input.Body.Domain
-		}
-		if input.Body.KMSKeyID != "" {
-			existing.KMSKeyID = input.Body.KMSKeyID
-		}
-		if input.Body.KMSKeyArn != "" {
-			existing.KMSKeyArn = input.Body.KMSKeyArn
 		}
 
 		// Apply protocol default updates if provided

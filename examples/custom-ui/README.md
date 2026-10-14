@@ -138,6 +138,19 @@ launcher. See the in-app **Configuration** page for the exact values
 (`customLoginUrl`, `trustedLoginRedirectUris`, and the session-establish / idp-initiate
 endpoints) for your deployment.
 
+Two gateway-side protections shape how this app must be registered:
+
+- **Origin allow-list for IdP-initiated SSO.** The gateway only accepts an `id_token`
+  form post to `/saml/idp-initiate` when the browser's `Origin` is the gateway itself or
+  the origin of the app's `customLoginUrl` / one of its `trustedLoginRedirectUris`. Add
+  this app's CloudFront (or custom-domain) URL to `trustedLoginRedirectUris` on every
+  SAML app you want the launcher to open, or the launch is rejected with 403.
+- **Browser binding for the login hand-back.** When the gateway redirects a user to this
+  page as a custom login page it sets a short-lived `__Host-` cookie bound to the
+  `state` value. The hand-back to `/login/complete` must come from that same browser;
+  a post from anywhere else (or after the 10-minute window) is rejected and the pending
+  flow is left intact for the real browser to finish.
+
 ## Layout
 
 ```

@@ -32,7 +32,96 @@ const (
 	flowCookieName = "saml_flow"
 	// cookieMaxAge controls how long the flow cookie is valid (10 minutes).
 	cookieMaxAge = 600
+	// loginBindingCookieName binds a REPLACE-mode custom-login flow to the
+	// browser that started it (finding M-4). It is set when the user is
+	// redirected to the custom login page and must be presented, with a FlowID
+	// equal to the echoed `state`, on the hand-back to /saml/login/complete.
+	// Without it an attacker could post their own id_token + a victim's state
+	// into the victim's browser (login CSRF / session fixation).
+	//
+	// __Host- prefix: Secure, Path=/, no Domain — the cookie is scoped to this
+	// exact origin and cannot be planted from a sibling subdomain.
+	// SameSite=None: the hand-back is a cross-site top-level POST from the
+	// custom login page; browsers do not send Lax cookies on those, so Lax would
+	// break every custom login page on another site. Security comes from the
+	// signed nonce <-> state comparison, not from SameSite.
+	loginBindingCookieName = "__Host-saml_login"
 )
+
+// loginBinding is the signed payload of the login-binding cookie.
+type loginBinding struct {
+	FlowID    string `json:"fid"`
+	CreatedAt int64  `json:"ca"`
+}
+
+// errLoginBindingMissing and friends are the verifyLoginBinding failure modes.
+var (
+	errLoginBindingMissing  = errors.New("login binding cookie missing")
+	errLoginBindingInvalid  = errors.New("login binding cookie invalid")
+	errLoginBindingMismatch = errors.New("login binding cookie does not match this flow")
+	errLoginBindingExpired  = errors.New("login binding cookie expired")
+)
+
+// setLoginBindingCookie mints the signed __Host-saml_login cookie for flowID.
+func (sp *SessionProvider) setLoginBindingCookie(w http.ResponseWriter, flowID string) error {
+	data, err := json.Marshal(&loginBinding{FlowID: flowID, CreatedAt: time.Now().Unix()})
+	if err != nil {
+		return err
+	}
+	val, err := sp.signedCookie.Encode(data)
+	if err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     loginBindingCookieName,
+		Value:    val,
+		Path:     "/",
+		MaxAge:   cookieMaxAge,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteNoneMode,
+	})
+	return nil
+}
+
+// verifyLoginBinding checks that the request carries a valid, unexpired
+// __Host-saml_login cookie minted for flowID. Any failure means the completion
+// did not come from the browser that started the flow.
+func (sp *SessionProvider) verifyLoginBinding(r *http.Request, flowID string) error {
+	c, err := r.Cookie(loginBindingCookieName)
+	if err != nil || c.Value == "" {
+		return errLoginBindingMissing
+	}
+	data, err := sp.signedCookie.Decode(c.Value)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errLoginBindingInvalid, err)
+	}
+	var b loginBinding
+	if err := json.Unmarshal(data, &b); err != nil {
+		return fmt.Errorf("%w: %v", errLoginBindingInvalid, err)
+	}
+	if b.FlowID == "" || b.FlowID != flowID {
+		return errLoginBindingMismatch
+	}
+	if time.Now().Unix()-b.CreatedAt > int64(cookieMaxAge) {
+		return errLoginBindingExpired
+	}
+	return nil
+}
+
+// clearLoginBindingCookie expires the __Host-saml_login cookie. The attributes
+// must match those used when it was set or the browser will not replace it.
+func clearLoginBindingCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     loginBindingCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteNoneMode,
+	})
+}
 
 // flowState is the data persisted in the flow cookie while the user
 // authenticates at Cognito.
@@ -198,7 +287,7 @@ func WithAppStore(a domain.AppReader) SessionProviderOption {
 // programming error; callers must supply a properly-sized key or nil.
 func WithHMACKey(key []byte) SessionProviderOption {
 	return func(sp *SessionProvider) {
-		sc, err := proxycrypto.NewSignedCookie(key)
+		sc, err := proxycrypto.NewSignedCookie(key, proxycrypto.CookiePurposeSAML)
 		if err != nil {
 			panic("WithHMACKey: " + err.Error())
 		}
@@ -240,7 +329,7 @@ func NewSessionProvider(opts ...SessionProviderOption) *SessionProvider {
 // client for backward compatibility in tests. It panics if hmacKey is non-nil
 // but not exactly 32 bytes — callers must supply a well-sized key or nil.
 func NewSessionProviderCompat(cognitoAuth *cognito.AuthClient, hmacKey []byte) *SessionProvider {
-	sc, err := proxycrypto.NewSignedCookie(hmacKey)
+	sc, err := proxycrypto.NewSignedCookie(hmacKey, proxycrypto.CookiePurposeSAML)
 	if err != nil {
 		panic("NewSessionProviderCompat: " + err.Error())
 	}
@@ -623,8 +712,24 @@ func (sp *SessionProvider) HandleCallback(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Build SAML session from Cognito claims.
-	session := buildSessionFromClaims(claims)
+	// Build SAML session from Cognito claims, honouring the target SP's NameID
+	// format/source. The legacy single-tenant path has no app store and passes
+	// nil (persistent sub).
+	var samlCfg *tenant.SAMLConfig
+	if sp.cognitoAuth == nil && sp.apps != nil && state.TenantSlug != "" {
+		if _, cfg, cerr := sp.apps.GetByTenantEntityID(r.Context(), state.TenantSlug, state.SPEntityID); cerr == nil {
+			samlCfg = cfg
+		} else {
+			slog.Warn("callback: failed to load SAML config for NameID resolution; using persistent sub",
+				"error", cerr, "tenant", state.TenantSlug, "entityID", state.SPEntityID)
+		}
+	}
+	session, err := buildSessionFromClaims(claims, samlCfg)
+	if err != nil {
+		slog.Warn("callback: cannot build session from id token", "error", err, "tenant", state.TenantSlug)
+		http.Error(w, "invalid id token", http.StatusUnauthorized)
+		return
+	}
 
 	// Set session cookie so subsequent requests find the session. Bind it to the
 	// tenant/source/SP recorded in the (signed) flow state so it cannot be
@@ -702,27 +807,28 @@ func extractBearerToken(r *http.Request) string {
 }
 
 // resolveSource resolves the identity source bound to the SP identified by
-// (tenant, entityID). Only available in multi-tenant mode (sources + apps
-// configured). Tenant is a required input, not derived from the entityID,
-// because a SAML entityID is unique only within a tenant — resolving it
-// without the tenant would let one tenant's SP bind to another tenant's
-// identity source.
-func (sp *SessionProvider) resolveSource(ctx context.Context, tenantSlug, entityID string) (*tenant.IdentitySource, error) {
+// (tenant, entityID), together with that SP's SAML configuration (NameID
+// format/source etc.) so the session can be built per the app's settings. Only
+// available in multi-tenant mode (sources + apps configured). Tenant is a
+// required input, not derived from the entityID, because a SAML entityID is
+// unique only within a tenant — resolving it without the tenant would let one
+// tenant's SP bind to another tenant's identity source.
+func (sp *SessionProvider) resolveSource(ctx context.Context, tenantSlug, entityID string) (*tenant.IdentitySource, *tenant.SAMLConfig, error) {
 	if sp.apps == nil || sp.sources == nil {
-		return nil, fmt.Errorf("source resolution not configured")
+		return nil, nil, fmt.Errorf("source resolution not configured")
 	}
 	if tenantSlug == "" {
-		return nil, fmt.Errorf("missing tenant for entity ID %q", entityID)
+		return nil, nil, fmt.Errorf("missing tenant for entity ID %q", entityID)
 	}
-	app, _, err := sp.apps.GetByTenantEntityID(ctx, tenantSlug, entityID)
+	app, samlCfg, err := sp.apps.GetByTenantEntityID(ctx, tenantSlug, entityID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve application for entity ID %q in tenant %q: %w", entityID, tenantSlug, err)
+		return nil, nil, fmt.Errorf("failed to resolve application for entity ID %q in tenant %q: %w", entityID, tenantSlug, err)
 	}
 	source, err := sp.sources.Get(ctx, tenantSlug, app.SourceID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve identity source %q for tenant %q: %w", app.SourceID, tenantSlug, err)
+		return nil, nil, fmt.Errorf("failed to resolve identity source %q for tenant %q: %w", app.SourceID, tenantSlug, err)
 	}
-	return source, nil
+	return source, samlCfg, nil
 }
 
 // verifierFor returns a cached verifier for the given Cognito pool or an error
@@ -790,7 +896,7 @@ func (sp *SessionProvider) trySessionFromIDToken(w http.ResponseWriter, r *http.
 	}
 	entityID := req.ServiceProviderMetadata.EntityID
 	tenantSlug := chi.URLParam(r, "tenant")
-	source, err := sp.resolveSource(r.Context(), tenantSlug, entityID)
+	source, samlCfg, err := sp.resolveSource(r.Context(), tenantSlug, entityID)
 	if err != nil {
 		slog.Warn("id-token auth: failed to resolve identity source", "error", err, "entityID", entityID, "tenant", tenantSlug)
 		http.Error(w, "unable to resolve identity provider", http.StatusInternalServerError)
@@ -834,7 +940,12 @@ func (sp *SessionProvider) trySessionFromIDToken(w http.ResponseWriter, r *http.
 	}
 
 	claims := cognito.ExtractClaims(payload)
-	session := buildSessionFromClaims(claims)
+	session, err := buildSessionFromClaims(claims, samlCfg)
+	if err != nil {
+		slog.Warn("id-token auth: cannot build session from id token", "error", err, "entityID", entityID)
+		http.Error(w, "invalid id token", http.StatusUnauthorized)
+		return nil, true
+	}
 
 	// Audit the direct-token authentication.
 	if sp.auditStore != nil {
@@ -929,6 +1040,15 @@ func (sp *SessionProvider) tryCustomLoginRedirect(w http.ResponseWriter, r *http
 			map[string]string{"tenant": tenantSlug})
 	}
 
+	// Bind this flow to the browser we are about to redirect (M-4): the
+	// hand-back to /saml/login/complete must carry this cookie with the same
+	// flow ID as the echoed `state`.
+	if err := sp.setLoginBindingCookie(w, flowID); err != nil {
+		slog.Error("custom login: failed to set login binding cookie", "error", err, "entityID", entityID)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return true
+	}
+
 	returnTo := sp.baseURL + "/t/" + tenantSlug + "/saml/login/complete"
 	http.Redirect(w, r, buildCustomLoginURL(app.CustomLoginURL, returnTo, flowID), http.StatusFound)
 	return true
@@ -970,7 +1090,22 @@ func (sp *SessionProvider) CompleteCustomLogin(ctx context.Context, flowID, toke
 	}
 
 	claims := cognito.ExtractClaims(payload)
-	session := buildSessionFromClaims(claims)
+
+	// The NameID follows the target SP's configuration. A missing config is not
+	// fatal (persistent sub); a missing subject is.
+	var samlCfg *tenant.SAMLConfig
+	if sp.apps != nil && pl.SPEntityID != "" {
+		if _, cfg, cerr := sp.apps.GetByTenantEntityID(ctx, pl.TenantSlug, pl.SPEntityID); cerr == nil {
+			samlCfg = cfg
+		} else {
+			slog.Warn("custom login: failed to load SAML config for NameID resolution; using persistent sub",
+				"error", cerr, "tenant", pl.TenantSlug, "entityID", pl.SPEntityID)
+		}
+	}
+	session, err := buildSessionFromClaims(claims, samlCfg)
+	if err != nil {
+		return "", nil, fmt.Errorf("invalid id token: %w", err)
+	}
 
 	if sp.auditStore != nil {
 		_ = sp.auditStore.LogStep(ctx, pl.TenantSlug, flowID, "sso_token_auth", pl.SPEntityID, claims.Email,
@@ -997,7 +1132,7 @@ func (sp *SessionProvider) BuildSessionCookieFromToken(ctx context.Context, tena
 	if sp.apps == nil || sp.sources == nil {
 		return "", fmt.Errorf("token authentication not configured")
 	}
-	source, err := sp.resolveSource(ctx, tenantSlug, entityID)
+	source, samlCfg, err := sp.resolveSource(ctx, tenantSlug, entityID)
 	if err != nil {
 		return "", fmt.Errorf("unable to resolve identity provider")
 	}
@@ -1012,7 +1147,10 @@ func (sp *SessionProvider) BuildSessionCookieFromToken(ctx context.Context, tena
 	if err != nil {
 		return "", fmt.Errorf("invalid id token")
 	}
-	session := buildSessionFromClaims(cognito.ExtractClaims(payload))
+	session, err := buildSessionFromClaims(cognito.ExtractClaims(payload), samlCfg)
+	if err != nil {
+		return "", fmt.Errorf("invalid id token: %w", err)
+	}
 	// Bind the cookie to the tenant, bound source, and target SP so the
 	// IdP-initiated session is only honoured for this tenant/SP.
 	return sp.encodeBoundSessionCookie(session, tenantSlug, source.ID, entityID)
@@ -1032,16 +1170,52 @@ func buildCustomLoginURL(loginURL, returnTo, flowID string) string {
 	return u.String()
 }
 
+// errNoSubject is returned by buildSessionFromClaims when the verified token
+// carries no `sub`; without a stable subject no NameID can be issued.
+var errNoSubject = errors.New("id token has no subject")
+
 // buildSessionFromClaims constructs a crewsaml.Session from extracted Cognito
-// claims. Shared by the Code+PKCE callback and the direct ID-token auth path.
-func buildSessionFromClaims(claims *cognito.UserClaims) *crewsaml.Session {
+// claims and the target app's SAML configuration. Shared by the Code+PKCE
+// callback, the direct ID-token auth path, the custom-login hand-back and the
+// IdP-initiated launch.
+//
+// The Subject NameID is chosen by resolveNameID from cfg.NameIDFormat /
+// cfg.NameIDSource and the verified claims: an emailAddress NameID is issued
+// ONLY when Cognito asserts email_verified=true, otherwise the session carries
+// a persistent NameID equal to the Cognito sub (finding M-6). cfg may be nil
+// (legacy single-tenant path), which resolves to a persistent sub. A token
+// without a sub yields an error and callers must fail closed (401).
+func buildSessionFromClaims(claims *cognito.UserClaims, cfg *tenant.SAMLConfig) (*crewsaml.Session, error) {
+	sessionID := generateFlowID()
+	sessionIndex := generateFlowID()
+
+	nameID, nameIDFormat, reason := resolveNameID(claims, cfg, sessionID)
+	if reason == nameIDReasonNoSubject {
+		return nil, errNoSubject
+	}
+	if reason != "" {
+		var requestedFormat, requestedSource string
+		if cfg != nil {
+			requestedFormat, requestedSource = cfg.NameIDFormat, cfg.NameIDSource
+		}
+		slog.Info("saml nameid fallback",
+			"reason", reason,
+			"requestedFormat", requestedFormat,
+			"requestedSource", requestedSource,
+			"issuedFormat", nameIDFormat)
+	}
+
+	// The session lives as long as the SP's SessionDurationSec allows (bounded;
+	// finding M-8). Every saml_session Set-Cookie derives its MaxAge from
+	// ExpireTime-CreateTime, and the assertion's SessionNotOnOrAfter mirrors it.
+	now := time.Now()
 	session := &crewsaml.Session{
-		ID:            generateFlowID(),
-		CreateTime:    time.Now(),
-		ExpireTime:    time.Now().Add(8 * time.Hour),
-		Index:         generateFlowID(),
-		NameID:        claims.Email,
-		NameIDFormat:  "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+		ID:            sessionID,
+		CreateTime:    now,
+		ExpireTime:    now.Add(sessionDuration(cfg)),
+		Index:         sessionIndex,
+		NameID:        nameID,
+		NameIDFormat:  nameIDFormat,
 		SubjectID:     claims.Sub,
 		UserName:      claims.Sub,
 		UserEmail:     claims.Email,
@@ -1060,7 +1234,7 @@ func buildSessionFromClaims(claims *cognito.UserClaims) *crewsaml.Session {
 		})
 	}
 
-	return session
+	return session, nil
 }
 
 // sessionBindingMatches reports whether a decoded session cookie's binding is
