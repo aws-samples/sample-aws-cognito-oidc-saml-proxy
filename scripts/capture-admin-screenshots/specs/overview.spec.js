@@ -79,13 +79,18 @@ test('capture annotated admin Overview', async ({ page }) => {
     await page.evaluate(injectCalloutsInPage, callouts);
 
     const vp = page.viewportSize();
-    // Trim the trailing whitespace: clip to the content height (plus a small margin), capped to
-    // the viewport so the fixed overlay stays aligned.
-    const contentH = await page.evaluate(() => {
-      const main = document.querySelector('main') || document.body;
-      return Math.ceil(main.getBoundingClientRect().bottom + 24);
-    });
-    const clipH = Math.min(vp.height, Math.max(900, contentH));
+    // Trim against the final Gateway Information key/value row rather than <main>, whose
+    // min-height expands to the 1600px viewport and leaves a large blank tail below the panel.
+    const gatewayLastPair = await boxOrNull(
+      page.getByText('OIDC Discovery URL', { exact: true }).locator('xpath=..'),
+    );
+    if (!gatewayLastPair) {
+      throw new Error('Gateway Information final row did not resolve for screenshot crop');
+    }
+    const clipH = Math.min(
+      vp.height,
+      Math.max(900, Math.ceil(gatewayLastPair.y + gatewayLastPair.height + 48)),
+    );
     const buf = await page.screenshot({ clip: { x: 0, y: 0, width: vp.width, height: clipH } });
     await writeOptimizedPng(buf, OUT);
   } catch (e) {

@@ -52,6 +52,7 @@ function injectCalloutsInPage(rects) {
 
   // Track occupied chip rectangles so later callouts nudge to avoid overlap.
   var placed = [];
+  var topLane = 0;
   function overlaps(a, b) {
     return !(a.x + a.w < b.x || b.x + b.w < a.x || a.y + a.h < b.y || b.y + b.h < a.y);
   }
@@ -71,7 +72,10 @@ function injectCalloutsInPage(rects) {
       tx = rect.x + rect.width / 2;
       ty = rect.y + rect.height;
       pillCx = Math.min(vw - R - 2, Math.max(R + 2, rect.x + rect.width + R + 10));
-      pillCy = ty + R + 10;
+      // Move the complete callout group, not only its chip, into a dedicated vertical lane.
+      // This keeps adjacent TopNavigation callouts and their leader lines visibly distinct.
+      pillCy = ty + R + 10 + topLane * (CHIP_H + 12);
+      topLane++;
     } else if (tx > R * 2 + 180) {
       pillCx = Math.max(R + 2, tx - 150);
       pillCy = ty;
@@ -103,8 +107,8 @@ function injectCalloutsInPage(rects) {
     var chipW = CHIP_PAD * 2 + text.length * CHAR_W;
     var chipX, chipY;
     if (nearTop) {
-      // Chip to the RIGHT of the pill for top-row callouts.
-      chipX = Math.min(vw - chipW - 2, pillCx + R + 6);
+      // Keep the chip on the inward side of the badge so it cannot be clipped at the right edge.
+      chipX = pillCx - R - 6 - chipW;
       chipY = pillCy - CHIP_H / 2;
     } else {
       chipX = pillCx - R - 6 - chipW;
