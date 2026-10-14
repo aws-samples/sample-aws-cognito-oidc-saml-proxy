@@ -11,13 +11,13 @@ type SAMLConfigInput struct {
 	MetadataURL        string   `json:"metadataUrl,omitempty" format:"uri" doc:"SP metadata URL"`
 	NameIDFormat       string   `json:"nameIdFormat,omitempty" doc:"NameID format (short code like 'email'/'persistent' or a full SAML NameID-Format URN). An emailAddress NameID is issued only when Cognito asserts email_verified=true; otherwise the gateway falls back to a persistent NameID equal to the Cognito sub."`
 	NameIDSource       string   `json:"nameIdSource,omitempty" doc:"Cognito attribute for the NameID value: 'sub' (default) or 'email'. 'email' is honoured only when the token carries a verified email (email_verified=true); unverified emails fall back to the persistent sub."`
-	SignResponse       *bool    `json:"signResponse,omitempty"`
-	SignAssertion      *bool    `json:"signAssertion,omitempty"`
-	EncryptAssertion   *bool    `json:"encryptAssertion,omitempty"`
+	SignResponse       *bool    `json:"signResponse,omitempty" doc:"The gateway always signs the SAML response (RSA-SHA256 via KMS). Omit or set true; false is rejected with 422."`
+	SignAssertion      *bool    `json:"signAssertion,omitempty" doc:"The gateway always signs the assertion (RSA-SHA256 via KMS). Omit or set true; false is rejected with 422."`
+	EncryptAssertion   *bool    `json:"encryptAssertion,omitempty" doc:"Encrypt the assertion to the SP's encryption certificate. Requires a certificate imported from the SP metadata (POST /applications/import); true without one is rejected with 422. Default false."`
 	AllowIDPInitiated  *bool    `json:"allowIdpInitiated,omitempty" doc:"Allow IdP-initiated SSO into this SP (default false)"`
 	SloURL             string   `json:"sloUrl,omitempty" format:"uri" doc:"Single Logout URL"`
-	SessionDurationSec int      `json:"sessionDurationSec,omitempty" doc:"Session duration in seconds"`
-	ClockSkewSec       int      `json:"clockSkewSec,omitempty" doc:"Clock skew tolerance in seconds"`
+	SessionDurationSec int      `json:"sessionDurationSec,omitempty" doc:"SAML session duration in seconds: 300-86400, or 0 for the default (3600). Drives the saml_session cookie lifetime and the assertion's SessionNotOnOrAfter. Out-of-range values are rejected with 422."`
+	ClockSkewSec       int      `json:"clockSkewSec,omitempty" doc:"Clock skew tolerance in seconds applied to the assertion's NotBefore: 0-600, or 0 for the default (180). Out-of-range values are rejected with 422."`
 }
 
 // OIDCConfigInput is the nested OIDC configuration block accepted on
@@ -29,8 +29,8 @@ type OIDCConfigInput struct {
 	ResponseTypes           []string `json:"responseTypes,omitempty" doc:"Allowed OAuth 2.0 response types"`
 	Scopes                  []string `json:"scopes,omitempty" doc:"Allowed OAuth 2.0 scopes"`
 	TokenEndpointAuthMethod string   `json:"tokenEndpointAuthMethod,omitempty" doc:"Token endpoint authentication method"`
-	IDTokenLifetimeSec      int      `json:"idTokenLifetimeSec,omitempty" doc:"ID token lifetime in seconds"`
-	AccessTokenLifetimeSec  int      `json:"accessTokenLifetimeSec,omitempty" doc:"Access token lifetime in seconds"`
+	IDTokenLifetimeSec      int      `json:"idTokenLifetimeSec,omitempty" doc:"ID token lifetime in seconds: 60-86400, or 0 for the default (3600). Out-of-range values are rejected with 422."`
+	AccessTokenLifetimeSec  int      `json:"accessTokenLifetimeSec,omitempty" doc:"Access token lifetime in seconds: 60-86400, or 0 for the default (3600). Out-of-range values are rejected with 422."`
 	RefreshTokenLifetimeSec int      `json:"refreshTokenLifetimeSec,omitempty" doc:"Refresh token lifetime in seconds (requires the refresh_token grant and offline_access scope; 0 uses the gateway default of 30 days)"`
 }
 

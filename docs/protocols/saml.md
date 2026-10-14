@@ -40,7 +40,7 @@ sequenceDiagram
 | Group-to-role mappings (Cognito group to SAML role value) | — |
 | Per-app SAML metadata endpoint | — |
 | AuthnRequest replay detection | — |
-| Per-tenant KMS signing keys | — |
+| Single gateway signing key (KMS) with an optional backup key for rotation | — |
 | Front-channel SLO (HTTP-Redirect) | — |
 
 ## Endpoints (per tenant)
@@ -53,6 +53,36 @@ sequenceDiagram
 | `/t/{tenant}/saml/slo` | Single Logout (HTTP-Redirect) |
 | `/t/{tenant}/saml/login/complete` | Custom login page hand-back (ID token + `state`) |
 | `/t/{tenant}/saml/idp-initiate` | IdP-initiated SSO (ID token + `entityId`), per-app opt-in |
+
+## Configuration fields
+
+A SAML application's configuration is set through the management API (`saml` block on
+`POST`/`PUT /api/v1/applications`) and the admin console. Every stored field is either
+honoured by the SSO path or refused by the API, so a configuration never describes
+behaviour the gateway does not deliver.
+
+### Honoured
+
+| Field | Effect | Bounds | Default (`0`/omitted) |
+|-------|--------|--------|------------------------|
+| `sessionDurationSec` | Lifetime of the gateway SAML session: `saml_session` cookie `Max-Age` and the assertion's `AuthnStatement/@SessionNotOnOrAfter` | 300–86400 s (422 outside) | 3600 s via the API; 8 h for records with `0` |
+| `clockSkewSec` | Allowance subtracted from the assertion's `Conditions/@NotBefore` (never earlier than the SP's `IssueInstant`) | 0–600 s (422 outside) | 180 s |
+| `encryptAssertion` | When `true`, the SP's imported encryption certificate is advertised and the assertion is encrypted to it. When `false`, a stored certificate is ignored and the assertion is sent signed but in clear | requires an encryption certificate imported from SP metadata | `false` |
+| `allowIdpInitiated` | Enables `/saml/idp-initiate` for this SP | — | `false` |
+| `nameIdFormat`, `nameIdSource` | See [NameID](#nameid) | — | persistent / `sub` |
+
+Stored records outside the bounds are clamped on the SSO path rather than honoured
+verbatim.
+
+### Refused
+
+| Request | Status | Reason |
+|---------|--------|--------|
+| `signResponse: false` or `signAssertion: false` | 422 | The gateway always signs both the response and the assertion (RSA-SHA256 via KMS) |
+| `encryptAssertion: true` without an SP encryption certificate | 422 | The certificate only comes from metadata import; there is nothing to encrypt to |
+| `sessionDurationSec` / `clockSkewSec` outside the bounds above | 422 | See bounds |
+| Tenant `kmsKeyId` / `kmsKeyArn` | 422 | Per-tenant signing keys are not supported; all tenants sign with the gateway key |
+| SP metadata with `WantAuthnRequestsSigned="true"` | not settable via the API; the SSO endpoint answers 500 and logs the reason, and `POST /applications/{id}/validate` reports an error | AuthnRequest signature verification is not implemented, so the gateway refuses to serve an SP whose administrator believes requests are verified |
 
 ## NameID
 

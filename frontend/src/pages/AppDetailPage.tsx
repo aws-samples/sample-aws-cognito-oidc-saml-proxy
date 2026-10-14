@@ -72,8 +72,8 @@ export default function AppDetailPage() {
   const [samlAcsUrl, setSamlAcsUrl] = useState('');
   const [samlNameIdFormat, setSamlNameIdFormat] = useState<{ label: string; value: string } | null>(null);
   const [samlNameIdSource, setSamlNameIdSource] = useState('');
-  const [samlSignResponse, setSamlSignResponse] = useState(false);
-  const [samlSignAssertion, setSamlSignAssertion] = useState(false);
+  // The gateway always signs both the response and the assertion; there is no
+  // toggle because the API refuses signResponse/signAssertion=false.
   const [samlEncryptAssertion, setSamlEncryptAssertion] = useState(false);
   const [samlAllowIdpInitiated, setSamlAllowIdpInitiated] = useState(false);
   const [samlSloUrl, setSamlSloUrl] = useState('');
@@ -148,8 +148,6 @@ export default function AppDetailPage() {
       setSamlEntityId(application.saml.entityId || '');
       setSamlAcsUrl(application.saml.acsUrl || '');
       setSamlNameIdSource(application.saml.nameIdSource || 'email');
-      setSamlSignResponse(application.saml.signResponse ?? false);
-      setSamlSignAssertion(application.saml.signAssertion ?? false);
       setSamlEncryptAssertion(application.saml.encryptAssertion ?? false);
       setSamlAllowIdpInitiated(application.saml.allowIdpInitiated ?? false);
       setSamlSloUrl(application.saml.sloUrl || '');
@@ -275,8 +273,8 @@ export default function AppDetailPage() {
               acsUrl: samlAcsUrl || application.saml?.acsUrl || '',
               nameIdFormat: samlNameIdFormat?.value || application.saml?.nameIdFormat || '',
               nameIdSource: samlNameIdSource || application.saml?.nameIdSource || 'email',
-              signResponse: samlSignResponse,
-              signAssertion: samlSignAssertion,
+              signResponse: true,
+              signAssertion: true,
               encryptAssertion: samlEncryptAssertion,
               allowIdpInitiated: samlAllowIdpInitiated,
               sloUrl: samlSloUrl || application.saml?.sloUrl || '',
@@ -594,21 +592,11 @@ export default function AppDetailPage() {
                       placeholder="email"
                     />
                   </FormField>
-                  <Toggle
-                    checked={samlSignResponse}
-                    onChange={({ detail }) => setSamlSignResponse(detail.checked)}
-                  >
-                    Sign Response
-                  </Toggle>
-                  <Toggle
-                    checked={samlSignAssertion}
-                    onChange={({ detail }) => setSamlSignAssertion(detail.checked)}
-                  >
-                    Sign Assertion
-                  </Toggle>
+                  <Box variant="p">Response and assertion are always signed (RSA-SHA256 via KMS).</Box>
                   <Toggle
                     checked={samlEncryptAssertion}
                     onChange={({ detail }) => setSamlEncryptAssertion(detail.checked)}
+                    description="Requires an SP encryption certificate imported from metadata; rejected otherwise."
                   >
                     Encrypt Assertion
                   </Toggle>
@@ -626,14 +614,14 @@ export default function AppDetailPage() {
                       placeholder="https://app.example.com/saml/slo"
                     />
                   </FormField>
-                  <FormField label="Session Duration (seconds)">
+                  <FormField label="Session Duration (seconds)" constraintText="Between 300 and 86400 seconds (5 minutes to 24 hours).">
                     <Input
                       type="number"
                       value={samlSessionDuration}
                       onChange={({ detail }) => setSamlSessionDuration(detail.value)}
                     />
                   </FormField>
-                  <FormField label="Clock Skew (seconds)">
+                  <FormField label="Clock Skew (seconds)" constraintText="Between 0 and 600 seconds.">
                     <Input
                       type="number"
                       value={samlClockSkew}
@@ -725,7 +713,7 @@ export default function AppDetailPage() {
                       ]}
                     />
                   </FormField>
-                  <FormField label="ID Token Lifetime (seconds)">
+                  <FormField label="ID Token Lifetime (seconds)" constraintText="Between 60 and 86400 seconds (1 minute to 24 hours).">
                     <Input
                       type="number"
                       value={oidcIdTokenLifetime}
@@ -733,7 +721,7 @@ export default function AppDetailPage() {
                       placeholder="3600"
                     />
                   </FormField>
-                  <FormField label="Access Token Lifetime (seconds)">
+                  <FormField label="Access Token Lifetime (seconds)" constraintText="Between 60 and 86400 seconds (1 minute to 24 hours).">
                     <Input
                       type="number"
                       value={oidcAccessTokenLifetime}

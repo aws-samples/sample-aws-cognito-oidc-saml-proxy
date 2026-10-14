@@ -435,6 +435,12 @@ func TestSAML_LoginComplete_MatchingCookie_Succeeds(t *testing.T) {
 	assert.Equal(t, http.SameSiteNoneMode, cleared.SameSite)
 	assert.True(t, cleared.Secure)
 
+	// M-8: the saml_session cookie lives as long as the session (the app has no
+	// SessionDurationSec, so the 8h default), not the 10-minute flow TTL.
+	sess := findCookie(res.Cookies(), sessionCookieName)
+	require.NotNil(t, sess, "success must set the session cookie")
+	assert.Equal(t, int((8*time.Hour).Seconds()), sess.MaxAge)
+
 	// Consumed.
 	_, err := env.pending.Get(context.Background(), "flow-1")
 	assert.ErrorIs(t, err, store.ErrNotFound)

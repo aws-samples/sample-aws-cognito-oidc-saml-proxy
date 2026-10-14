@@ -41,7 +41,7 @@ standalone, multi-tenant federation service rather than an app-embedded broker:
 | SAML 2.0 IdP role for Cognito | Yes (signed assertions via KMS) | No |
 | Per-tenant OIDC issuers + per-app claim mapping | Yes, config-driven | Limited / app-coded |
 | Custom login that keeps Cognito OAuth endpoints + SSO | Yes | Partial |
-| Multi-tenant isolation (issuers, KMS keys, cross-pool) | Built in | Not a goal |
+| Multi-tenant isolation (issuers, signing key, cross-pool) | Built in | Not a goal |
 | Deployment | Standalone serverless stack | Amplify app component |
 
 ## Architecture at a glance

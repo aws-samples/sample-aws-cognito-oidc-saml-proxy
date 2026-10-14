@@ -8,6 +8,28 @@ import (
 	"github.com/zitadel/oidc/v3/pkg/op"
 )
 
+// defaultTokenLifetime applies to ID and access tokens whose configured
+// lifetime is 0 (unset). The bounds live in the tenant package
+// (tenant.TokenLifetimeMinSec / MaxSec): the management API refuses values
+// outside them with 422 (finding M-8), and the token path clamps anyway so a
+// record written by an older API can never mint a near-immortal token.
+const defaultTokenLifetime = 1 * time.Hour
+
+// boundedTokenLifetime converts a configured lifetime in seconds to a Duration
+// clamped to [tenant.TokenLifetimeMinSec, tenant.TokenLifetimeMaxSec]; 0 means
+// "default".
+func boundedTokenLifetime(sec int) time.Duration {
+	switch {
+	case sec == 0:
+		return defaultTokenLifetime
+	case sec < tenant.TokenLifetimeMinSec:
+		sec = tenant.TokenLifetimeMinSec
+	case sec > tenant.TokenLifetimeMaxSec:
+		sec = tenant.TokenLifetimeMaxSec
+	}
+	return time.Duration(sec) * time.Second
+}
+
 // Client implements op.Client by wrapping a tenant Application and its OIDCConfig.
 type Client struct {
 	app     *tenant.Application
@@ -92,11 +114,14 @@ func (c *Client) AccessTokenType() op.AccessTokenType {
 	return op.AccessTokenTypeBearer
 }
 
+
+// IDTokenLifetime returns the client's IDTokenLifetimeSec bounded to the shared
+// token-lifetime range, or the 1h default when unset.
 func (c *Client) IDTokenLifetime() time.Duration {
-	if c.oidcCfg != nil && c.oidcCfg.IDTokenLifetimeSec > 0 {
-		return time.Duration(c.oidcCfg.IDTokenLifetimeSec) * time.Second
+	if c.oidcCfg == nil {
+		return defaultTokenLifetime
 	}
-	return 1 * time.Hour
+	return boundedTokenLifetime(c.oidcCfg.IDTokenLifetimeSec)
 }
 
 func (c *Client) DevMode() bool {

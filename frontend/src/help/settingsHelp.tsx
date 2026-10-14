@@ -46,16 +46,19 @@ export const protocolDefaultsHelp: HelpContent = {
       <h3>SAML defaults</h3>
       <dl>
         <dt><strong>Session duration</strong></dt>
-        <dd>Default assertion session length (seconds) for new SAML apps.</dd>
+        <dd>Default SAML session length (seconds, 300–86400) pre-filled in the wizard for new SAML apps.</dd>
         <dt><strong>Sign Response / Sign Assertion</strong></dt>
-        <dd>Whether new SAML apps sign the response and/or assertion by default.</dd>
+        <dd>
+          Pre-fill the wizard only. The gateway always signs both the response and the
+          assertion regardless of these defaults.
+        </dd>
         <dt><strong>NameID format</strong></dt>
         <dd>Default subject identifier format for new SAML apps.</dd>
       </dl>
       <h3>OIDC defaults</h3>
       <dl>
         <dt><strong>ID / Access token lifetime</strong></dt>
-        <dd>Default token validity (seconds) for new OIDC apps.</dd>
+        <dd>Default token validity (seconds, 60–86400) pre-filled in the wizard for new OIDC apps.</dd>
       </dl>
     </div>
   ),

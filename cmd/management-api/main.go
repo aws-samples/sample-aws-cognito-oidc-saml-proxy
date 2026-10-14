@@ -201,8 +201,6 @@ func init() {
 		BaseURL:          cfg.BaseURL,
 		EntityID:         cfg.EntityID,
 		KMSKeyID:         cfg.KMSKeyID,
-		AWSRegion:        cfg.AWSRegion,
-		SaaSAccountID:    cfg.SaaSAccountID,
 		Environment:      cfg.Environment,
 		Verifier:         verifier,
 		VerifierClientID: cfg.CognitoClientID,

@@ -40,6 +40,15 @@ func RegisterAppRoutes(api huma.API, apps domain.AppRepository, claims domain.Cl
 			return nil, huma.Error422UnprocessableEntity("invalid login configuration: " + strings.Join(errs, "; "))
 		}
 
+		// M-8: refuse configuration the protocol path cannot honour before
+		// anything is persisted.
+		if errs := validateSAMLConfigInput(input.Body.SAML, nil); len(errs) > 0 {
+			return nil, huma.Error422UnprocessableEntity("invalid SAML configuration: " + strings.Join(errs, "; "))
+		}
+		if errs := validateOIDCConfigInput(input.Body.OIDC); len(errs) > 0 {
+			return nil, huma.Error422UnprocessableEntity("invalid OIDC configuration: " + strings.Join(errs, "; "))
+		}
+
 		var samlCfg *tenant.SAMLConfig
 		if strings.EqualFold(app.Protocol, "saml") {
 			s := input.Body.SAML
@@ -231,12 +240,27 @@ func RegisterAppRoutes(api huma.API, apps domain.AppRepository, claims domain.Cl
 			return nil, huma.Error422UnprocessableEntity("invalid login configuration: " + strings.Join(errs, "; "))
 		}
 
+		// M-8: validate the protocol blocks BEFORE the base record is written so
+		// a refused request leaves the application untouched. The stored SAML
+		// config supplies the imported certificates the encryption check needs.
+		updateSAML := strings.EqualFold(existing.Protocol, "saml") && input.Body.SAML != nil && input.Body.SAML.EntityID != ""
+		var prevSAML *tenant.SAMLConfig
+		if updateSAML {
+			prevSAML, _ = apps.GetSAMLConfig(ctx, slug, input.ID)
+			if errs := validateSAMLConfigInput(input.Body.SAML, prevSAML); len(errs) > 0 {
+				return nil, huma.Error422UnprocessableEntity("invalid SAML configuration: " + strings.Join(errs, "; "))
+			}
+		}
+		if errs := validateOIDCConfigInput(input.Body.OIDC); len(errs) > 0 {
+			return nil, huma.Error422UnprocessableEntity("invalid OIDC configuration: " + strings.Join(errs, "; "))
+		}
+
 		if err := apps.Update(ctx, slug, existing); err != nil {
 			return nil, huma.Error500InternalServerError("failed to update application", err)
 		}
 
 		// Update SAML config if protocol is saml
-		if strings.EqualFold(existing.Protocol, "saml") && input.Body.SAML != nil && input.Body.SAML.EntityID != "" {
+		if updateSAML {
 			s := input.Body.SAML
 			samlCfg := &tenant.SAMLConfig{
 				EntityID:           s.EntityID,
@@ -252,6 +276,14 @@ func RegisterAppRoutes(api huma.API, apps domain.AppRepository, claims domain.Cl
 				SloURL:             s.SloURL,
 				SessionDurationSec: setIntDefault(s.SessionDurationSec, 3600),
 				ClockSkewSec:       setIntDefault(s.ClockSkewSec, 180),
+			}
+			// UpdateSAMLConfig overwrites the whole item. The SP certificates are
+			// only ever written by metadata import and are not part of the input,
+			// so carry them forward or every edit would silently drop them (and
+			// with them the encryption the admin just enabled).
+			if prevSAML != nil {
+				samlCfg.SigningCertPem = prevSAML.SigningCertPem
+				samlCfg.EncryptionCertPem = prevSAML.EncryptionCertPem
 			}
 			if err := apps.UpdateSAMLConfig(ctx, slug, input.ID, samlCfg); err != nil {
 				return nil, huma.Error500InternalServerError("failed to update SAML config", err)

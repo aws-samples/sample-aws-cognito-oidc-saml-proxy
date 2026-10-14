@@ -4,6 +4,8 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
+	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -55,8 +57,24 @@ func (p *SPProvider) GetServiceProvider(r *http.Request, serviceProviderID strin
 		return nil, os.ErrNotExist
 	}
 
+	// Fail closed on a setting the gateway cannot honour (finding M-8). An SP
+	// whose metadata demands signed AuthnRequests expects the IdP to verify the
+	// signature; this IdP does not, so serving it would silently accept forged
+	// requests the SP's administrator believes are rejected. A non-ErrNotExist
+	// error makes crewjam return 500 and log the reason instead of 404.
+	if samlCfg.WantAuthnRequestsSigned {
+		slog.Error("saml sp: WantAuthnRequestsSigned is set but AuthnRequest signature verification is not implemented; refusing SP",
+			"tenant", tenantSlug, "entityID", serviceProviderID, "appID", app.ID)
+		return nil, errAuthnRequestSignatureUnsupported
+	}
+
 	return buildEntityDescriptor(samlCfg), nil
 }
+
+// errAuthnRequestSignatureUnsupported is returned by GetServiceProvider for an
+// SP that requires signed AuthnRequests. It deliberately does not wrap
+// os.ErrNotExist so crewjam treats it as a server error, not an unknown SP.
+var errAuthnRequestSignatureUnsupported = errors.New("saml sp requires signed AuthnRequests (WantAuthnRequestsSigned) but AuthnRequest signature verification is not implemented")
 
 // buildEntityDescriptor converts a tenant.SAMLConfig to a saml.EntityDescriptor.
 func buildEntityDescriptor(cfg *tenant.SAMLConfig) *saml.EntityDescriptor {
@@ -94,8 +112,12 @@ func buildEntityDescriptor(cfg *tenant.SAMLConfig) *saml.EntityDescriptor {
 		}
 	}
 
-	// Add encryption key descriptor if present.
-	if cfg.EncryptionCertPem != "" {
+	// Advertise the encryption key descriptor only when the administrator
+	// enabled EncryptAssertion AND an encryption certificate is stored. crewjam
+	// encrypts whenever the SP descriptor carries an encryption cert, so a
+	// stored certificate alone must not switch encryption on behind the flag's
+	// back (finding M-8). The API refuses EncryptAssertion without a cert.
+	if cfg.EncryptAssertion && cfg.EncryptionCertPem != "" {
 		if kd, err := buildKeyDescriptor(cfg.EncryptionCertPem, "encryption"); err == nil {
 			spSSO.KeyDescriptors = append(spSSO.KeyDescriptors, kd)
 		}

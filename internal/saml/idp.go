@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 
 	"github.com/crewjam/saml"
 	"github.com/go-chi/chi/v5"
@@ -84,33 +83,22 @@ func RegisterRoutes(mux *http.ServeMux, idp *saml.IdentityProvider, sessionProv 
 	// SLO is Task 12
 }
 
-// TenantSignerFactory creates a KMSSigner for a given KMS key ID. This is used
-// to create per-tenant signers when a tenant has a custom signing key configured.
-type TenantSignerFactory func(kmsKeyID string) (*proxycrypto.KMSSigner, error)
-
 // TenantIdPHandler provides tenant-scoped SAML IdP endpoints. It creates a
 // per-request crewjam/saml.IdentityProvider with the correct tenant-scoped
-// URLs (metadata, SSO, SLO). Supports per-tenant KMS signing keys via a
-// cached signer map.
+// URLs (metadata, SSO, SLO). Every tenant signs with the single gateway signing
+// key (plus the optional backup key during rotation); per-tenant KMS keys are
+// not supported and the management API refuses them.
 type TenantIdPHandler struct {
-	signer        crypto.Signer
-	certificate   *x509.Certificate
-	certStore     *proxycrypto.CertStore
-	spProvider    *SPProvider
-	sessionProv   *SessionProvider
-	assertMaker   *CustomAssertionMaker
-	baseURL       string
-	signerFactory TenantSignerFactory
-	signerCache   sync.Map // map[string]*tenantSignerEntry
-	tenants       domain.TenantReader
-	apps          domain.AppReader
-	claims        domain.ClaimRepository
-}
-
-// tenantSignerEntry holds a cached per-tenant signer and certificate.
-type tenantSignerEntry struct {
-	signer crypto.Signer
-	cert   *x509.Certificate
+	signer      crypto.Signer
+	certificate *x509.Certificate
+	certStore   *proxycrypto.CertStore
+	spProvider  *SPProvider
+	sessionProv *SessionProvider
+	assertMaker *CustomAssertionMaker
+	baseURL     string
+	tenants     domain.TenantReader
+	apps        domain.AppReader
+	claims      domain.ClaimRepository
 }
 
 // TenantIdPOption is a functional option for configuring TenantIdPHandler.
@@ -174,53 +162,6 @@ func NewTenantIdPHandler(opts ...TenantIdPOption) *TenantIdPHandler {
 		opt(h)
 	}
 	return h
-}
-
-// SetSignerFactory configures a factory for creating per-tenant KMS signers.
-// When set, tenants with a custom KMSKeyID will use a dedicated signing key.
-func (h *TenantIdPHandler) SetSignerFactory(factory TenantSignerFactory) {
-	h.signerFactory = factory
-}
-
-// getTenantSigner returns a cached per-tenant signer and certificate, or
-// creates one if the tenant has a custom KMS key and a signer factory is set.
-// Falls back to the gateway-level signer if no custom key is configured.
-func (h *TenantIdPHandler) getTenantSigner(kmsKeyID, entityID string) (crypto.Signer, *x509.Certificate) {
-	if kmsKeyID == "" || h.signerFactory == nil {
-		return h.signer, h.certificate
-	}
-
-	// Check cache
-	if cached, ok := h.signerCache.Load(kmsKeyID); ok {
-		entry := cached.(*tenantSignerEntry)
-		return entry.signer, entry.cert
-	}
-
-	// Create new signer for this tenant
-	kmsSigner, err := h.signerFactory(kmsKeyID)
-	if err != nil {
-		slog.Error("failed to create tenant-specific signer, falling back to gateway signer",
-			"kmsKeyId", kmsKeyID,
-			"error", err,
-		)
-		return h.signer, h.certificate
-	}
-
-	// Generate a certificate for this tenant signer
-	cert, err := proxycrypto.GenerateSelfSignedCert(kmsSigner, entityID)
-	if err != nil {
-		slog.Error("failed to generate tenant certificate, falling back to gateway signer",
-			"kmsKeyId", kmsKeyID,
-			"error", err,
-		)
-		return h.signer, h.certificate
-	}
-
-	entry := &tenantSignerEntry{signer: kmsSigner, cert: cert}
-	h.signerCache.Store(kmsKeyID, entry)
-
-	slog.Info("created per-tenant signer", "kmsKeyId", kmsKeyID)
-	return kmsSigner, cert
 }
 
 // ServeMetadata handles GET /t/{tenant}/saml/metadata.
@@ -472,6 +413,15 @@ func (h *TenantIdPHandler) HandleLoginComplete(w http.ResponseWriter, r *http.Re
 	// The binding has done its job; drop it so it cannot be replayed.
 	clearLoginBindingCookie(w)
 
+	// The cookie lives exactly as long as the session it carries (the SP's
+	// SessionDurationSec, finding M-8) — the same rule the other mint sites use.
+	session, err := h.sessionProv.decodeSessionCookie(sessCookie)
+	if err != nil {
+		slog.Error("custom login complete: cannot decode freshly minted session", "error", err, "tenant", tenantSlug)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	// Set the session cookie on the response so subsequent browser requests
 	// carry it, and inject it into this request so the resumed ServeSSO finds
 	// the session instead of starting another login.
@@ -479,7 +429,7 @@ func (h *TenantIdPHandler) HandleLoginComplete(w http.ResponseWriter, r *http.Re
 		Name:     sessionCookieName,
 		Value:    sessCookie,
 		Path:     "/",
-		MaxAge:   cookieMaxAge,
+		MaxAge:   int(session.ExpireTime.Sub(session.CreateTime).Seconds()),
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
@@ -617,16 +567,9 @@ func (h *TenantIdPHandler) HandleIdPInitiate(w http.ResponseWriter, r *http.Requ
 	idp.ServeIDPInitiated(w, r, entityID, relayState)
 }
 
-// buildIdP creates a crewjam/saml.IdentityProvider with tenant-scoped URLs.
-// If kmsKeyID is non-empty and a signer factory is configured, a per-tenant
-// signer is used. Otherwise, the gateway-level signer is used.
+// buildIdP creates a crewjam/saml.IdentityProvider with tenant-scoped URLs,
+// signing with the gateway-level signer and certificate.
 func (h *TenantIdPHandler) buildIdP(tenantSlug string) *saml.IdentityProvider {
-	return h.buildIdPWithKey(tenantSlug, "")
-}
-
-// buildIdPWithKey creates a crewjam/saml.IdentityProvider with tenant-scoped URLs
-// and optionally uses a per-tenant KMS signing key.
-func (h *TenantIdPHandler) buildIdPWithKey(tenantSlug, kmsKeyID string) *saml.IdentityProvider {
 	base, err := url.Parse(h.baseURL)
 	if err != nil {
 		slog.Error("invalid base URL in IdP handler",
@@ -655,13 +598,10 @@ func (h *TenantIdPHandler) buildIdPWithKey(tenantSlug, kmsKeyID string) *saml.Id
 	sloURL := *base
 	sloURL.Path = "/t/" + tenantSlug + "/saml/slo"
 
-	// Use per-tenant signer if custom KMS key is configured
-	tenantSigner, tenantCert := h.getTenantSigner(kmsKeyID, metadataURL.String())
-
 	return &saml.IdentityProvider{
-		Key:                     tenantSigner,
-		Signer:                  tenantSigner,
-		Certificate:             tenantCert,
+		Key:                     h.signer,
+		Signer:                  h.signer,
+		Certificate:             h.certificate,
 		Logger:                  log.Default(),
 		MetadataURL:             metadataURL,
 		SSOURL:                  ssoURL,

@@ -261,8 +261,6 @@ func main() {
 		BaseURL:          cfg.BaseURL,
 		EntityID:         cfg.EntityID,
 		KMSKeyID:         cfg.KMSKeyID,
-		AWSRegion:        cfg.AWSRegion,
-		SaaSAccountID:    cfg.SaaSAccountID,
 		Environment:      cfg.Environment,
 		Verifier:         apiVerifier,
 		VerifierClientID: cfg.CognitoClientID,

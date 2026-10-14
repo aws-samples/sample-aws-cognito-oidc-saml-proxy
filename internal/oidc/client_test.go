@@ -137,6 +137,27 @@ func TestClient_IDTokenLifetime_Custom(t *testing.T) {
 	assert.Equal(t, 30*time.Minute, c.IDTokenLifetime())
 }
 
+// TestClient_IDTokenLifetime_Bounded is the M-8 regression: a stored lifetime
+// outside [60s, 24h] is clamped rather than minting near-immortal (or instantly
+// expired) ID tokens; 0 keeps the 1h default.
+func TestClient_IDTokenLifetime_Bounded(t *testing.T) {
+	cases := []struct {
+		sec  int
+		want time.Duration
+	}{
+		{0, time.Hour},
+		{5, 60 * time.Second},
+		{-1, 60 * time.Second},
+		{60, 60 * time.Second},
+		{86400, 24 * time.Hour},
+		{999999, 24 * time.Hour},
+	}
+	for _, tc := range cases {
+		c := newTestClient(&tenant.Application{ID: "app-1"}, &tenant.OIDCConfig{IDTokenLifetimeSec: tc.sec})
+		assert.Equal(t, tc.want, c.IDTokenLifetime(), "IDTokenLifetimeSec=%d", tc.sec)
+	}
+}
+
 func TestClient_DevMode(t *testing.T) {
 	c := newTestClient(&tenant.Application{ID: "app-1"}, nil)
 	assert.False(t, c.DevMode())

@@ -73,7 +73,7 @@ func newTestTenantAPI(t *testing.T) (humatest.TestAPI, *store.TenantStore) {
 	appStore := store.NewAppStore(memStore, "test")
 
 	api.UseMiddleware(injectOnboardingTenant("gateway-ops", []string{middleware.GlobalOperatorGroup}))
-	RegisterTenantRoutes(api, tenantStore, appStore, testKMSKeyPolicy())
+	RegisterTenantRoutes(api, tenantStore, appStore)
 	return api, tenantStore
 }
 

@@ -58,14 +58,20 @@ export const samlConfigHelp: HelpContent = {
       </dl>
       <h3>Signing &amp; encryption</h3>
       <dl>
-        <dt><strong>Sign Response / Sign Assertion</strong></dt>
+        <dt><strong>Signing</strong></dt>
         <dd>
-          Whether the gateway signs the SAML response, the assertion, or both, with the
-          gateway signing certificate (see the Certificates page). Most SPs require at least
-          one; signing the assertion is the common choice.
+          The gateway always signs both the SAML response and the assertion (RSA-SHA256) with
+          the gateway signing certificate (see the Certificates page). This is not
+          configurable: the API rejects <code>signResponse</code> or{' '}
+          <code>signAssertion</code> set to <code>false</code>.
         </dd>
         <dt><strong>Encrypt Assertion</strong></dt>
-        <dd>Encrypts the assertion to the SP's public key (when the SP supplies one).</dd>
+        <dd>
+          Encrypts the assertion to the SP's encryption certificate. The certificate is only
+          stored by importing the SP's metadata; enabling the toggle without one is rejected.
+          When the toggle is off, a stored certificate is ignored and the assertion is sent
+          signed but unencrypted.
+        </dd>
       </dl>
       <h3>IdP-initiated SSO</h3>
       <p>
@@ -82,9 +88,16 @@ export const samlConfigHelp: HelpContent = {
       <h3>Sessions</h3>
       <dl>
         <dt><strong>Session duration</strong></dt>
-        <dd>How long the issued assertion's session is valid (seconds).</dd>
+        <dd>
+          How long the gateway's SAML session lasts (seconds): the <code>saml_session</code>{' '}
+          cookie expires and the assertion's <code>SessionNotOnOrAfter</code> is set to this.
+          Must be between 300 and 86400 (5 minutes to 24 hours).
+        </dd>
         <dt><strong>Clock skew</strong></dt>
-        <dd>Tolerance for time differences between the gateway and SP when validating timestamps.</dd>
+        <dd>
+          Allowance (seconds) subtracted from the assertion's <code>NotBefore</code> so an SP
+          whose clock runs slightly behind still accepts it. Must be between 0 and 600.
+        </dd>
         <dt><strong>SLO URL</strong></dt>
         <dd>The SP's Single Logout endpoint (optional).</dd>
       </dl>
@@ -123,7 +136,8 @@ export const oidcConfigHelp: HelpContent = {
       <h3>Token lifetimes</h3>
       <p>
         <strong>ID token</strong> and <strong>Access token</strong> lifetimes (seconds) control
-        how long issued tokens remain valid before the client must refresh.
+        how long issued tokens remain valid before the client must refresh. Both must be
+        between 60 and 86400 (1 minute to 24 hours); values outside that range are rejected.
       </p>
     </div>
   ),

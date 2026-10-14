@@ -1205,11 +1205,14 @@ func buildSessionFromClaims(claims *cognito.UserClaims, cfg *tenant.SAMLConfig) 
 			"issuedFormat", nameIDFormat)
 	}
 
+	// The session lives as long as the SP's SessionDurationSec allows (bounded;
+	// finding M-8). Every saml_session Set-Cookie derives its MaxAge from
+	// ExpireTime-CreateTime, and the assertion's SessionNotOnOrAfter mirrors it.
 	now := time.Now()
 	session := &crewsaml.Session{
 		ID:            sessionID,
 		CreateTime:    now,
-		ExpireTime:    now.Add(8 * time.Hour),
+		ExpireTime:    now.Add(sessionDuration(cfg)),
 		Index:         sessionIndex,
 		NameID:        nameID,
 		NameIDFormat:  nameIDFormat,

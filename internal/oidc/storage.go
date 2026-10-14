@@ -383,14 +383,16 @@ func (s *Storage) CreateAccessToken(ctx context.Context, req op.TokenRequest) (s
 		return "", time.Time{}, err
 	}
 
-	expiration := time.Now().Add(1 * time.Hour)
-
 	// Extract ClientID from the request. Both the authorization-code
 	// (*AuthRequest) and refresh-token (*refreshTokenRequest) paths expose it.
 	var clientID string
 	if cg, ok := req.(interface{ GetClientID() string }); ok {
 		clientID = cg.GetClientID()
 	}
+
+	// The access token lives as long as the client's AccessTokenLifetimeSec
+	// allows (bounded; finding M-8), mirroring refreshTokenLifetime.
+	expiration := time.Now().Add(s.accessTokenLifetime(ctx, clientID))
 
 	// Carry the Cognito claims onto the token record: userinfo and introspection
 	// receive only the opaque token and run on a different Lambda, so the
@@ -493,6 +495,21 @@ func (s *Storage) CreateAccessAndRefreshTokens(ctx context.Context, req op.Token
 	}
 
 	return accessTokenID, refreshToken, expiration, nil
+}
+
+// accessTokenLifetime resolves the access-token lifetime for a client: its
+// OIDCConfig.AccessTokenLifetimeSec clamped to the shared token-lifetime
+// bounds, or defaultTokenLifetime when unset (0) or the client cannot be
+// resolved. Lookup failures are non-fatal — they just yield the default.
+func (s *Storage) accessTokenLifetime(ctx context.Context, clientID string) time.Duration {
+	if clientID == "" {
+		return defaultTokenLifetime
+	}
+	_, _, oidcCfg, err := s.appStore.GetByClientID(ctx, clientID)
+	if err != nil || oidcCfg == nil {
+		return defaultTokenLifetime
+	}
+	return boundedTokenLifetime(oidcCfg.AccessTokenLifetimeSec)
 }
 
 // refreshTokenLifetime resolves the refresh-token lifetime for a client,

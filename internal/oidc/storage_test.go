@@ -357,6 +357,65 @@ func TestCreateAccessToken(t *testing.T) {
 	assert.True(t, expiration.After(time.Now()))
 }
 
+// TestCreateAccessToken_HonoursConfiguredLifetime is the M-8 regression: the
+// access token expires after the client's AccessTokenLifetimeSec (bounded to
+// [60s, 24h]; 0 = 1h default) instead of a hard-coded hour, and the stored
+// record agrees with the returned expiry so introspection/userinfo cut off at
+// the same instant.
+func TestCreateAccessToken_HonoursConfiguredLifetime(t *testing.T) {
+	cases := []struct {
+		name string
+		sec  int
+		want time.Duration
+	}{
+		{"600 -> 10m", 600, 10 * time.Minute},
+		{"0 -> default 1h", 0, time.Hour},
+		{"5 -> clamped to 60s", 5, 60 * time.Second},
+		{"999999 -> clamped to 24h", 999999, 24 * time.Hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, appStore, _, _ := newTestStorage(t)
+			ctx := context.Background()
+			clientID := seedOIDCClient(t, appStore, "test-tenant")
+			_, _, cfg, err := appStore.GetByClientID(ctx, clientID)
+			require.NoError(t, err)
+			cfg.AccessTokenLifetimeSec = tc.sec
+			require.NoError(t, appStore.UpdateOIDCConfig(ctx, "test-tenant", clientID, cfg))
+
+			authReq, err := s.CreateAuthRequest(ctx, &oidc.AuthRequest{
+				ClientID:     clientID,
+				RedirectURI:  "https://app.example.com/callback",
+				Scopes:       oidc.SpaceDelimitedArray{"openid"},
+				ResponseType: oidc.ResponseTypeCode,
+			}, "")
+			require.NoError(t, err)
+
+			before := time.Now()
+			tokenID, expiration, err := s.CreateAccessToken(ctx, authReq)
+			require.NoError(t, err)
+			assert.WithinDuration(t, before.Add(tc.want), expiration, 5*time.Second)
+
+			var item accessTokenItem
+			require.NoError(t, s.db.Get(ctx, oidcAccessTokenPK(tokenID), oidcAccessTokenSK(), &item))
+			assert.True(t, item.ExpiresAt.Equal(expiration))
+		})
+	}
+
+	t.Run("unknown client -> default 1h", func(t *testing.T) {
+		s, _, _, _ := newTestStorage(t)
+		ctx := context.Background()
+		authReq, err := s.CreateAuthRequest(ctx, &oidc.AuthRequest{
+			ClientID: "no-such-client", RedirectURI: "https://app.example.com/callback",
+			Scopes: oidc.SpaceDelimitedArray{"openid"}, ResponseType: oidc.ResponseTypeCode,
+		}, "")
+		require.NoError(t, err)
+		_, expiration, err := s.CreateAccessToken(ctx, authReq)
+		require.NoError(t, err)
+		assert.WithinDuration(t, time.Now().Add(time.Hour), expiration, 5*time.Second)
+	})
+}
+
 func TestHealth(t *testing.T) {
 	s, _, _, _ := newTestStorage(t)
 	ctx := context.Background()

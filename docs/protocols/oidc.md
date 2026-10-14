@@ -32,7 +32,7 @@ sequenceDiagram
 | Declarative per-app claim mappings (config, not Lambda code) | Pre-token-generation Lambda trigger |
 | Token introspection endpoint ([RFC 7662](https://datatracker.ietf.org/doc/html/rfc7662)) | — |
 | Cross-pool federation (one gateway, multiple Cognito pools) | One pool per app client set |
-| Per-tenant KMS signing keys | AWS-managed pool signing keys |
+| Single gateway signing key (KMS) with an optional backup key for rotation | AWS-managed pool signing keys |
 | Unified SAML + OIDC management API and UI | Separate console/API per protocol |
 | Raw `cognito:groups` passed as `groups` claim | Same (`cognito:groups` in ID token) |
 
@@ -77,6 +77,20 @@ A mapping whose target is a standard or reserved claim name (`sub`, `iss`, `aud`
 `iat`, `nbf`, `nonce`, `at_hash`, `c_hash`, `azp`, `auth_time`, `amr`, `acr`, `email`,
 `email_verified`, `name`, `given_name`, `family_name`, `preferred_username`) is ignored and
 logged; mapped values can never overwrite the identity claims above.
+
+## Token lifetimes
+
+Per-application lifetimes are set through the management API (`oidc.idTokenLifetimeSec`,
+`oidc.accessTokenLifetimeSec`, `oidc.refreshTokenLifetimeSec`) and the admin console.
+
+| Field | Honoured as | Bounds | Default (`0`) | Out of range |
+|-------|-------------|--------|---------------|--------------|
+| `idTokenLifetimeSec` | ID token `exp` | 60–86400 s | 3600 s | 422 on create/update |
+| `accessTokenLifetimeSec` | Access token expiry (also enforced by UserInfo and introspection) | 60–86400 s | 3600 s | 422 on create/update |
+| `refreshTokenLifetimeSec` | Refresh token expiry (refresh_token grant + `offline_access`) | — | 30 days | — |
+
+Stored records outside the bounds (for example written before the bounds existed) are
+clamped on the token path rather than honoured verbatim.
 
 ## Endpoints (per tenant)
 

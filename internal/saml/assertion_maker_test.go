@@ -458,6 +458,107 @@ func TestAssertionMaker_NoTenantOnRequest_NoAttributeStatement(t *testing.T) {
 	assert.Empty(t, req.Assertion.AttributeStatements)
 }
 
+// newTimingTestFixture seeds an app whose SAML config carries the given
+// ClockSkewSec (SessionDurationSec is irrelevant here: the session's
+// ExpireTime is what MakeAssertion copies into SessionNotOnOrAfter).
+func newTimingTestFixture(t *testing.T, clockSkewSec int) (*store.AppStore, *store.ClaimStore) {
+	t.Helper()
+	ms := store.NewMemoryStore()
+	appStore := store.NewAppStore(ms, "test-table")
+	claimStore := store.NewClaimStore(ms, "test-table")
+	_, err := appStore.Create(context.Background(), "acme", &tenant.Application{
+		DisplayName: "Timing SP", Protocol: "saml", SourceID: "source-1", Status: "active",
+	}, &tenant.SAMLConfig{
+		EntityID:           "https://sp.example.com/saml",
+		AcsURL:             "https://sp.example.com/saml/acs",
+		AcsURLs:            []string{"https://sp.example.com/saml/acs"},
+		SignResponse:       true,
+		SignAssertion:      true,
+		SessionDurationSec: 3600,
+		ClockSkewSec:       clockSkewSec,
+	})
+	require.NoError(t, err)
+	return appStore, claimStore
+}
+
+// TestAssertionMaker_SessionNotOnOrAfter_EqualsSessionExpiry is the M-8
+// regression for SessionDurationSec on the wire: the AuthnStatement advertises
+// the session's expiry so the SP's session cannot outlive the gateway's.
+func TestAssertionMaker_SessionNotOnOrAfter_EqualsSessionExpiry(t *testing.T) {
+	appStore, claimStore := newTimingTestFixture(t, 180)
+	session := richSession()
+	session.CreateTime = time.Now().Truncate(time.Second)
+	session.ExpireTime = session.CreateTime.Add(45 * time.Minute)
+
+	req := defaultMakerRequest(t)
+	require.NoError(t, NewAssertionMaker(appStore, claimStore).MakeAssertion(req, session))
+
+	require.Len(t, req.Assertion.AuthnStatements, 1)
+	got := req.Assertion.AuthnStatements[0].SessionNotOnOrAfter
+	require.NotNil(t, got, "AuthnStatement must carry SessionNotOnOrAfter")
+	assert.True(t, got.Equal(session.ExpireTime), "SessionNotOnOrAfter=%v want %v", got, session.ExpireTime)
+
+	// The attribute is actually serialised (crewjam omits it when nil).
+	el := req.Assertion.Element()
+	authn := el.FindElement("./saml:AuthnStatement")
+	require.NotNil(t, authn)
+	assert.NotEmpty(t, authn.SelectAttrValue("SessionNotOnOrAfter", ""))
+}
+
+// TestAssertionMaker_NotBefore_HonoursClockSkew is the M-8 regression for
+// ClockSkewSec: Conditions.NotBefore is Now minus the SP's configured skew
+// instead of crewjam's fixed 180s.
+func TestAssertionMaker_NotBefore_HonoursClockSkew(t *testing.T) {
+	cases := []struct {
+		name    string
+		skewSec int
+		want    time.Duration
+	}{
+		{"60s configured", 60, 60 * time.Second},
+		{"0 -> default 180s", 0, 180 * time.Second},
+		{"clamped to 600s", 5000, 600 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			appStore, claimStore := newTimingTestFixture(t, tc.skewSec)
+			req := defaultMakerRequest(t)
+			// The SP's request predates Now by more than any skew so the
+			// IssueInstant floor never kicks in.
+			req.Request.IssueInstant = req.Now.Add(-time.Hour)
+			require.NoError(t, NewAssertionMaker(appStore, claimStore).MakeAssertion(req, richSession()))
+
+			require.NotNil(t, req.Assertion.Conditions)
+			assert.True(t, req.Assertion.Conditions.NotBefore.Equal(req.Now.Add(-tc.want)),
+				"NotBefore=%v want Now-%v (%v)", req.Assertion.Conditions.NotBefore, tc.want, req.Now.Add(-tc.want))
+		})
+	}
+}
+
+// TestAssertionMaker_NotBefore_NeverPredatesRequest keeps crewjam's rule: the
+// skew allowance cannot move NotBefore before the SP's own IssueInstant.
+func TestAssertionMaker_NotBefore_NeverPredatesRequest(t *testing.T) {
+	appStore, claimStore := newTimingTestFixture(t, 600)
+	req := defaultMakerRequest(t)
+	req.Request.IssueInstant = req.Now.Add(-10 * time.Second)
+	require.NoError(t, NewAssertionMaker(appStore, claimStore).MakeAssertion(req, richSession()))
+	assert.True(t, req.Assertion.Conditions.NotBefore.Equal(req.Request.IssueInstant))
+}
+
+// TestAssertionMaker_UnknownApp_DefaultTiming: when the SP cannot be resolved
+// the maker still emits a sane window (default skew) and the session expiry.
+func TestAssertionMaker_UnknownApp_DefaultTiming(t *testing.T) {
+	appStore, claimStore := newTimingTestFixture(t, 60)
+	session := richSession()
+	session.ExpireTime = time.Now().Add(time.Hour)
+	req := defaultMakerRequest(t)
+	req.ServiceProviderMetadata.EntityID = "https://unknown.example.com/saml"
+	req.Request.IssueInstant = req.Now.Add(-time.Hour)
+	require.NoError(t, NewAssertionMaker(appStore, claimStore).MakeAssertion(req, session))
+	assert.True(t, req.Assertion.Conditions.NotBefore.Equal(req.Now.Add(-180*time.Second)))
+	require.NotNil(t, req.Assertion.AuthnStatements[0].SessionNotOnOrAfter)
+	assert.True(t, req.Assertion.AuthnStatements[0].SessionNotOnOrAfter.Equal(session.ExpireTime))
+}
+
 func mustURL(t *testing.T, raw string) url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)

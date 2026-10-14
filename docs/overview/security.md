@@ -21,7 +21,9 @@ API layer, cryptographic signing, and the request-handling code.
   `saml-sso` and `oidc-authorize` instance; each protocol derives its own HMAC and AES
   subkeys from it (a SAML cookie is never valid on the OIDC surface), and every cookie
   carries a key-id prefix so a rotated or mismatched key is rejected explicitly.
-- **Per-tenant KMS signing keys** are supported for tenant isolation.
+- **Single gateway signing key (KMS)** with an optional backup key for rotation. Every tenant
+  signs with it; tenant-specific signing keys are not supported and the management API rejects
+  `kmsKeyId`/`kmsKeyArn` on tenants (422).
 
 ## Request protection
 

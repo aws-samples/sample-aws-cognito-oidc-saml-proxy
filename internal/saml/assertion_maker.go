@@ -34,7 +34,10 @@ func NewAssertionMaker(appStore *store.AppStore, claimStore *store.ClaimStore) *
 // (when the assertion is not yet populated), then discards whatever
 // AttributeStatement that produced and attaches one built exclusively from the
 // app's claim/role mappings — or none at all when nothing is mapped or the app
-// cannot be resolved.
+// cannot be resolved. It also applies the SP's timing configuration (finding
+// M-8): Conditions.NotBefore honours ClockSkewSec and every AuthnStatement
+// carries SessionNotOnOrAfter equal to the session expiry, which in turn
+// honours SessionDurationSec.
 func (m *CustomAssertionMaker) MakeAssertion(req *saml.IdpAuthnRequest, session *saml.Session) error {
 	// Build the base assertion using the library default, unless the caller
 	// has already provided one (e.g. in tests).
@@ -44,50 +47,79 @@ func (m *CustomAssertionMaker) MakeAssertion(req *saml.IdpAuthnRequest, session 
 		}
 	}
 
+	tenantSlug, app, samlCfg := m.resolveApp(req)
+
+	applyTimingConfig(req, session, samlCfg)
+
 	// Only mapped attributes are ever released. Drop the default maker's
 	// statement (and any pre-populated one) before deciding what to add.
 	req.Assertion.AttributeStatements = nil
 
-	attrs := m.mappedAttributes(req, session)
+	var attrs []saml.Attribute
+	if app != nil {
+		attrs = m.mappedAttributes(req, session, tenantSlug, app)
+	}
 	if len(attrs) > 0 {
 		req.Assertion.AttributeStatements = []saml.AttributeStatement{{Attributes: attrs}}
 	}
 	return nil
 }
 
-// mappedAttributes resolves the app's claim/role mappings for the request and
-// evaluates them against the session. It returns nil — i.e. release nothing —
-// when the tenant, app or mappings cannot be resolved; it never falls back to
-// the crewjam defaults.
-func (m *CustomAssertionMaker) mappedAttributes(req *saml.IdpAuthnRequest, session *saml.Session) []saml.Attribute {
+// applyTimingConfig post-adjusts the default maker's validity window with the
+// SP's bounded timing settings. cfg may be nil (defaults apply). Fields the
+// caller did not populate (tests hand in a bare Assertion) are left alone.
+func applyTimingConfig(req *saml.IdpAuthnRequest, session *saml.Session, cfg *tenant.SAMLConfig) {
+	if req.Assertion.Conditions != nil && !req.Now.IsZero() {
+		notBefore := req.Now.Add(-clockSkew(cfg))
+		// Never predate the SP's own request (same rule as the default maker).
+		if notBefore.Before(req.Request.IssueInstant) {
+			notBefore = req.Request.IssueInstant
+		}
+		req.Assertion.Conditions.NotBefore = notBefore
+	}
+	if session != nil && !session.ExpireTime.IsZero() {
+		for i := range req.Assertion.AuthnStatements {
+			expiry := session.ExpireTime
+			req.Assertion.AuthnStatements[i].SessionNotOnOrAfter = &expiry
+		}
+	}
+}
+
+// resolveApp resolves the SP's application and SAML config, tenant-scoped from
+// the request path (/t/{tenant}/...). A SAML entityID is unique only within a
+// tenant, so without a tenant on the request nothing is resolved (nil app) —
+// callers then release no attributes and fall back to default timing rather
+// than risk resolving another tenant's app.
+func (m *CustomAssertionMaker) resolveApp(req *saml.IdpAuthnRequest) (string, *tenant.Application, *tenant.SAMLConfig) {
 	var entityID string
 	if req.ServiceProviderMetadata != nil {
 		entityID = req.ServiceProviderMetadata.EntityID
 	}
 
-	// Resolve the tenant from the request path (/t/{tenant}/...). The custom
-	// attribute mappings are per-app within a tenant, and a SAML entityID is
-	// unique only within a tenant, so the lookup must be tenant-scoped. Without
-	// a tenant we cannot safely resolve the app, so release no attributes rather
-	// than risk resolving another tenant's app.
 	if req.HTTPRequest == nil {
 		slog.Warn("assertion: no HTTP request in context; releasing no attributes", "entityID", entityID)
-		return nil
+		return "", nil, nil
 	}
 	tenantSlug := chi.URLParam(req.HTTPRequest, "tenant")
 	if tenantSlug == "" {
 		slog.Warn("assertion: no tenant on request path; releasing no attributes", "entityID", entityID)
-		return nil
+		return "", nil, nil
 	}
-	ctx := req.HTTPRequest.Context()
 
-	// Look up the app within this tenant to get its ID for querying mappings.
-	app, _, err := m.appStore.GetByTenantEntityID(ctx, tenantSlug, entityID)
+	app, samlCfg, err := m.appStore.GetByTenantEntityID(req.HTTPRequest.Context(), tenantSlug, entityID)
 	if err != nil {
 		slog.Warn("assertion: cannot resolve application; releasing no attributes",
 			"error", err, "entityID", entityID, "tenant", tenantSlug)
-		return nil
+		return tenantSlug, nil, nil
 	}
+	return tenantSlug, app, samlCfg
+}
+
+// mappedAttributes loads the app's claim/role mappings and evaluates them
+// against the session. It returns nil — i.e. release nothing — when the
+// mappings cannot be loaded; it never falls back to the crewjam defaults.
+func (m *CustomAssertionMaker) mappedAttributes(req *saml.IdpAuthnRequest, session *saml.Session, tenantSlug string, app *tenant.Application) []saml.Attribute {
+	ctx := req.HTTPRequest.Context()
 
 	claimMappings, err := m.claimStore.GetClaimMappings(ctx, tenantSlug, app.ID)
 	if err != nil {
