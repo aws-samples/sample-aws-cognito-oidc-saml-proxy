@@ -204,7 +204,7 @@ resource "aws_cognito_user_pool_client" "spa" {
     "https://${aws_cloudfront_distribution.main.domain_name}",
   ])
 
-  supported_identity_providers = ["COGNITO"]
+  supported_identity_providers = concat(["COGNITO"], var.spa_additional_identity_providers)
 
   prevent_user_existence_errors = "ENABLED"
 
