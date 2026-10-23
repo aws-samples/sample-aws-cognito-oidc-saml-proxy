@@ -12,10 +12,10 @@
   },
   "dependencies": {
     "@cloudscape-design/collection-hooks": "^1.0.110",
-    "@cloudscape-design/components": "^3.0.1396",
+    "@cloudscape-design/components": "^3.0.1401",
     "@cloudscape-design/global-styles": "^1.0.71",
-    "@tanstack/react-query": "^5.104.1",
-    "aws-amplify": "^6.22.1",
+    "@tanstack/react-query": "^5.104.3",
+    "aws-amplify": "^6.22.2",
     "openapi-fetch": "^0.17.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -29,7 +29,7 @@
     "jsdom": "^29.1.1",
     "typescript": "^6.0.3",
     "vite": "^8.3.4",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   },
   "overrides": {
     "js-cookie": "3.0.7",
