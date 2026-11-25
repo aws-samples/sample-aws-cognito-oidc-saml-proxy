@@ -130,7 +130,7 @@ render-diagrams:
 	rsvg-convert --width=3200 $(DIAGRAM_IMAGES)/architecture.svg -o $(DIAGRAM_IMAGES)/architecture.png
 	rsvg-convert --width=1100 $(DIAGRAM_IMAGES)/architecture-simple.svg -o $(DIAGRAM_IMAGES)/architecture-simple.png
 	rsvg-convert --width=1100 $(DIAGRAM_IMAGES)/architecture-simple-dark.svg -o $(DIAGRAM_IMAGES)/architecture-simple-dark.png
-# Run the local security scanner suite (mirrors the Probe/Holmes CI jobs).
+# Run the local security scanner suite.
 # Gates on ERROR/HIGH+ findings; results written to scan-results/ (gitignored).
 security-scan:
 	./scripts/security-scan.sh

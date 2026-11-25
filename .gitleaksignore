@@ -1,8 +1,8 @@
 # gitleaks ignore file — reviewed false positives.
 #
-# gitleaks (and the Amazon Probe/Holmes secret-detection job) loads this file
-# automatically and suppresses any finding whose fingerprint is listed here.
-# Unlike .gitleaks.toml, .gitleaksignore is honored by the CI secret scanner.
+# gitleaks loads this file automatically and suppresses any finding whose
+# fingerprint is listed here. Unlike .gitleaks.toml, .gitleaksignore is also
+# honored by CI secret scanners that run gitleaks with default settings.
 #
 # Every fingerprint below was manually triaged and is NOT a real secret. See
 # scan-results/SUMMARY.md for the full write-up. Two fingerprint forms are

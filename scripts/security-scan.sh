@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
-# security-scan.sh — run the security scanner suite locally, mirroring the
-# jobs the Amazon Probe / Holmes pipeline runs against this repo so findings
-# can be triaged BEFORE pushing.
+# security-scan.sh — run the security scanner suite locally so findings can be
+# triaged BEFORE pushing.
 #
 # Scanners (each is skipped with a note if not installed):
 #   - gitleaks     secrets (honors .gitleaksignore + .gitleaks.toml)
@@ -15,11 +14,10 @@
 #
 # Results are written to scan-results/ (gitignored).
 #
-# Gating (default SEVERITY_GATE=error): fails only on the findings that block
-# the Public Content Security Review — secrets (gitleaks) and High/Critical
-# dependency vulnerabilities (grype, govulncheck). SAST/IaC (semgrep, checkov,
-# cfn_nag, bandit) are advisory: reported for triage but non-gating, matching
-# how the Probe/Holmes pipeline classifies them (WARNING/INFO).
+# Gating (default SEVERITY_GATE=error): fails only on the findings that must be
+# clear before publishing — secrets (gitleaks) and High/Critical dependency
+# vulnerabilities (grype, govulncheck). SAST/IaC (semgrep, checkov, cfn_nag,
+# bandit) are advisory: reported for triage but non-gating (WARNING/INFO).
 #
 # Strict mode (SEVERITY_GATE=warning): also gates on semgrep ERROR/WARNING and
 # grype Medium.
@@ -80,8 +78,7 @@ run_semgrep() {
   semgrep scan --config auto $sev --sarif --output "$OUT/semgrep.sarif" . >/dev/null 2>&1
   local rc=$?
   semgrep scan --config auto $sev --quiet . 2>/dev/null | tail -n 20
-  # SAST is advisory by default (aligns with Probe, which treats SAST as
-  # WARNING/INFO). Only gate on it in strict mode.
+  # SAST is advisory by default (WARNING/INFO). Only gate on it in strict mode.
   if [ "$SEVERITY_GATE" = "warning" ] && [ $rc -ne 0 ]; then FAIL=1; fi
 }
 
