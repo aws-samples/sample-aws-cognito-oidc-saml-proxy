@@ -155,6 +155,14 @@ global_settings:
       rule_id: "SECRET-SECRET-KEYWORD"
       reason: "Terraform template testdata fixtures use 'secret' as a placeholder label — not real credentials."
 
+    - path: "internal/oidc/conformance_test.go"
+      rule_id: "SECRET-BASE64-HIGH-ENTROPY-STRING"
+      reason: "RFC 7636 Appendix B PKCE test vector (code_verifier / code_challenge published in the spec), not a credential."
+
+    - path: "scripts/capture-admin-screenshots/seed.js"
+      rule_id: "SECRET-SECRET-KEYWORD"
+      reason: "'CognitoIdentityServiceProvider' is Amplify's localStorage key prefix. The script builds fake offline tokens from documented placeholders; no credential."
+
     ###########################################################################
     # CHECKOV — CKV_AWS_309: API GatewayV2 route authorization type
     #
