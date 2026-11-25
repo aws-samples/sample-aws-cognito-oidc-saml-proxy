@@ -2,7 +2,7 @@ module github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/test-rp
 
 go 1.26.1
 
-toolchain go1.26.9
+toolchain go1.26.11
 
 require (
 	github.com/aws/aws-lambda-go v1.55.1

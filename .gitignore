@@ -24,7 +24,7 @@ cmd/oidc-token/oidc-token
 cmd/saml-metadata/saml-metadata
 cmd/saml-slo/saml-slo
 cmd/saml-sso/saml-sso
-# Local push helper (agent harness workaround; not for upstream)
+# Local push helper (not part of the sample)
 scripts/push-branch.sh
 
 # Terraform
@@ -89,7 +89,7 @@ docs/threat-model.md
 frontend/.env.local
 frontend/.env.*.local
 
-# Local security-scan outputs (share with Guardian; do not commit)
+# Local security-scan outputs (do not commit)
 scan-results/
 # ASH (Automated Security Helper) output — CI regenerates this as a job
 # artifact; never commit the local scan tree.

@@ -75,7 +75,7 @@ func TestLoadConfig_MissingEdgeSecretARN_Production(t *testing.T) {
 // loads it onto Config for the cold-start SM fetch.
 func TestLoadConfig_EdgeSecretARNLoaded(t *testing.T) {
 	setRequiredEnv(t)
-	arn := "arn:aws:secretsmanager:eu-north-1:127218179144:secret:dev-edge-secret-AbCdEf"
+	arn := "arn:aws:secretsmanager:eu-north-1:123456789012:secret:dev-edge-secret-AbCdEf"
 	t.Setenv("PROXY_EDGE_AUTH_SECRET_ARN", arn)
 	cfg, err := config.Load()
 	require.NoError(t, err)
@@ -89,7 +89,7 @@ func TestLoadConfig_EdgeSecretARNLoaded(t *testing.T) {
 // point of use.
 func TestLoadConfig_CookieKeySecretARNLoaded(t *testing.T) {
 	setRequiredEnv(t)
-	arn := "arn:aws:secretsmanager:eu-north-1:127218179144:secret:dev-cookie-key-AbCdEf"
+	arn := "arn:aws:secretsmanager:eu-north-1:123456789012:secret:dev-cookie-key-AbCdEf"
 	t.Setenv("PROXY_COOKIE_KEY_SECRET_ARN", arn)
 	cfg, err := config.Load()
 	require.NoError(t, err)
@@ -222,6 +222,6 @@ func setRequiredEnv(t *testing.T) {
 	t.Setenv("PROXY_COGNITO_CLIENT_ID", "test-client-id")
 	// Deployed environments require the CloudFront origin-verify secret ARN so
 	// the cold-start SM fetch succeeds and the edge gate enforces.
-	t.Setenv("PROXY_EDGE_AUTH_SECRET_ARN", "arn:aws:secretsmanager:eu-north-1:127218179144:secret:test-edge-secret-AbCdEf")
+	t.Setenv("PROXY_EDGE_AUTH_SECRET_ARN", "arn:aws:secretsmanager:eu-north-1:123456789012:secret:test-edge-secret-AbCdEf")
 	t.Setenv("PROXY_ENVIRONMENT", "prod")
 }
