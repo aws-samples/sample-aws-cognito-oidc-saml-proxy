@@ -26,6 +26,29 @@ jobs:
           fi
           echo "No Terraform plan/state artifacts tracked."
 
+  public-content-check:
+    name: Public content check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so a pull request's commit messages can be scanned.
+          fetch-depth: 0
+
+      - name: Check tracked files and commit messages
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Optional newline-separated extra patterns. Unset on fork PRs, so
+          # only the generic checks run there.
+          PUBLIC_CHECK_PATTERNS: ${{ secrets.PUBLIC_CHECK_PATTERNS }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            ./scripts/check-public.sh --range "$BASE_SHA..$HEAD_SHA"
+          else
+            ./scripts/check-public.sh
+          fi
+
   go-checks:
     name: Go checks
     runs-on: ubuntu-latest
