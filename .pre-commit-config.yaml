@@ -1,11 +1,12 @@
-# Pre-commit hooks — fast local mirror of the CI gates so failures surface
-# before a push instead of in CI. Install once with:
+# Pre-commit hooks — fast local mirror of the .github/workflows/ci.yml gates so
+# failures surface before a push instead of in the pull request. Install once with:
 #   pipx install pre-commit   # or: pip install pre-commit
 #   pre-commit install
+#   pre-commit install --hook-type commit-msg   # optional: also check messages
 # Run against everything on demand:
 #   pre-commit run --all-files
 #
-# Heavy CI gates (go test -race, govulncheck, ASH, SAST) are intentionally NOT
+# Heavy CI gates (go test -race, govulncheck, ASH) are intentionally NOT
 # duplicated here — they belong in CI. These hooks cover the cheap checks that
 # catch the mistakes that most often break the pipeline locally.
 
@@ -98,3 +99,23 @@ repos:
             .*\.example|
             infra/env/.*\.(tfvars|backend\.hcl)
           )$
+  # --- Publication guard -------------------------------------------------
+  # Mirrors CI's public content check: no internal hostnames, real account IDs,
+  # or local state in what is committed. Private patterns come from the
+  # gitignored .public-check-patterns file. The commit-msg hook runs only after
+  # `pre-commit install --hook-type commit-msg`.
+  - repo: local
+    hooks:
+      - id: check-public
+        name: public content check
+        entry: scripts/check-public.sh --cached
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+      - id: check-public-message
+        name: public content check (commit message)
+        entry: scripts/check-public.sh --message
+        language: system
+        always_run: true
+        stages: [commit-msg]

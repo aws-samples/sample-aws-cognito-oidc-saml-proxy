@@ -12,10 +12,10 @@
 #   scripts/check-public.sh --message <f>   scan only a commit message file
 #
 # Checks:
-#   1. Forbidden paths    agent/IDE state, scan output, Terraform state and plans,
-#                         env files, keys, decks, real per-env tfvars/backends,
-#                         and files that are kept out of this repository
-#                         (.gitlab-ci.yml, sync/).
+#   1. Forbidden paths    agent and IDE state (.kiro/, .claude/, .agents/,
+#                         .worktrees/, AGENTS.md, CLAUDE.md, KIRO.md), scan
+#                         output, Terraform state and plans, env files, keys,
+#                         decks, and real per-env tfvars/backends.
 #                         *.example is allowed.
 #   2. Internal names     internal-only hostnames and tool names.
 #   3. Account IDs        12-digit IDs in ARNs or ECR hosts, other than the
@@ -59,7 +59,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 # --- Patterns ----------------------------------------------------------------
 
-FORBIDDEN_PATHS='(^|/)(\.gitlab-ci\.yml|\.kiro/|\.claude/|\.ash/|scan-results/|deploy-state/)|\.tfstate(\.|$)|\.tfplan$|(^|/)\.env(\.[^/]*)?$|\.pem$|\.pptx$|^docs/threat-model\.md$|^infra/env/[^/]+\.(tfvars|backend\.hcl)$|^sync/'
+FORBIDDEN_PATHS='(^|/)(\.kiro/|\.claude/|\.agents/|\.worktrees/|\.ash/|scan-results/|deploy-state/)|(^|/)(AGENTS|CLAUDE|KIRO)\.md$|\.tfstate(\.|$)|\.tfplan$|(^|/)\.env(\.[^/]*)?$|\.pem$|\.pptx$|^docs/threat-model\.md$|^infra/env/[^/]+\.(tfvars|backend\.hcl)$'
 
 # Matched case-insensitively. Holmes is matched as a whole word only.
 INTERNAL_NAMES='gitlab\.aws\.dev|\.aws\.dev|code\.amazon\.com|(^|[^[:alnum:].-])w\.amazon\.com|\.a2z\.com|corp\.amazon\.com|\.amazon\.dev|quip-amazon\.com|phonetool|issues\.amazon\.com|sim\.amazon\.com|ant\.amazon\.com|isengard|(^|[^[:alnum:]_])midway([^[:alnum:]_]|$)|Probe/Holmes|(^|[^[:alnum:]_])Holmes([^[:alnum:]_]|$)'
