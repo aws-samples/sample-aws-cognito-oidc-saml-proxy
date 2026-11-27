@@ -41,6 +41,7 @@ sequenceDiagram
 | Per-app SAML metadata endpoint | — |
 | AuthnRequest replay detection | — |
 | Single gateway signing key (KMS) with an optional backup key for rotation | — |
+| Per-app custom login page | — |
 | Front-channel SLO (HTTP-Redirect) | — |
 
 ## Endpoints (per tenant)
@@ -51,6 +52,7 @@ sequenceDiagram
 | `/t/{tenant}/saml/metadata/{appId}` | Per-application IdP metadata |
 | `/t/{tenant}/saml/sso` | Single Sign-On (HTTP-Redirect, HTTP-POST) |
 | `/t/{tenant}/saml/slo` | Single Logout (HTTP-Redirect) |
+| `/t/{tenant}/saml/acs` | Gateway callback from Amazon Cognito Managed Login (internal) |
 | `/t/{tenant}/saml/login/complete` | Custom login page hand-back (ID token + `state`) |
 | `/t/{tenant}/saml/idp-initiate` | IdP-initiated SSO (ID token + `entityId`), per-app opt-in |
 
@@ -124,7 +126,8 @@ An application may replace the Cognito Managed Login with its own login page
 (`customLoginUrl`). The gateway redirects the user there with a `state` value and the page
 posts a Cognito ID token plus that `state` back to `/saml/login/complete`. An application
 that opts in to IdP-initiated SSO can also be launched directly by posting an ID token and
-the target `entityId` to `/saml/idp-initiate`.
+the target `entityId` to `/saml/idp-initiate`. See
+[Custom login pages](../guides/custom-login.md) for the full flow and setup.
 
 !!! note "Browser binding"
     - **Login hand-back.** The redirect to the custom login page sets a short-lived,

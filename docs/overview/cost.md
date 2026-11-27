@@ -17,7 +17,7 @@ low volume and scale with usage.
 | Amazon CloudFront | 3 distributions, pay-per-use | ~$0–1 |
 | Amazon DynamoDB | 2 on-demand tables | ~$0–1 |
 | AWS Lambda | 10 functions (arm64), pay-per-request | ~$0 (free tier) |
-| Amazon Cognito | 1 user pool | ~$0 (≤50k MAU free) |
+| Amazon Cognito | 1 user pool (Plus tier, for admins) | ~$0 idle; $0.02 per monthly active admin (Plus has no free tier) |
 | Amazon Route 53 | hosted zone (only if `custom_domain` is set) | $0 (default off) |
 | **Baseline (idle)** | | **~$28–35 / month** |
 
