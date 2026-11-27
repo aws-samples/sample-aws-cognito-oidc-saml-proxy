@@ -4,7 +4,9 @@ The **Identity Federation Gateway** is a multi-tenant, serverless gateway that a
 SAML 2.0 Identity Provider (IdP) role and extends the native OpenID Connect 1.0 Provider
 capabilities of [Amazon Cognito](https://aws.amazon.com/cognito/) user pools — adding
 per-tenant issuers, per-application claim mappings, token introspection
-([RFC 7662](https://datatracker.ietf.org/doc/html/rfc7662)), and cross-pool federation.
+([RFC 7662](https://datatracker.ietf.org/doc/html/rfc7662)), and cross-pool federation,
+plus [custom login pages](../guides/custom-login.md) that keep the standard OAuth 2.0, SAML,
+and OIDC flows.
 
 ## The problem it solves
 

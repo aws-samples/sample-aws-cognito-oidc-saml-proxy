@@ -5,316 +5,262 @@ from scratch with Terraform, then completing the post-install configuration to s
 and federate a first application.
 
 > Time: ~30–45 minutes (most of it CloudFront provisioning). Everything is created in
-> **one AWS account/region** and can be torn down with a single `terraform destroy`.
+> **one AWS account/region**. The infrastructure is split into three Terraform stacks
+> (`registry`, `gateway`, `demo`) that are applied in order and destroyed in reverse.
 
 ## High-level steps
 
 ```mermaid
 flowchart TD
-    A["1. Prerequisites<br/>(AWS account, tools, credentials)"] --> B["2. Configure variables<br/>(infra/env/&lt;env&gt;.tfvars)"]
-    B --> C["3. terraform init"]
-    C --> D["4. Bootstrap ECR repos<br/>terraform apply -target=module.ecr_fn"]
-    D --> E["5. Build &amp; push Lambda images<br/>(8 container images → ECR)"]
-    E --> F["6. terraform apply<br/>(Lambdas, API GW, Cognito, CloudFront, KMS, DynamoDB, WAF)"]
-    F --> G["7. Build &amp; deploy admin console<br/>(frontend → S3 → CloudFront)"]
-    G --> H["8. Post-install configuration"]
-    subgraph H1 ["8. Post-install (one-time)"]
-      H --> I["8a. Create first admin user"]
-      I --> J["8b. Sign in to the console"]
-      J --> K["8c. Create a tenant"]
-      K --> L["8d. Add an identity source (Cognito pool)"]
-      L --> M["8e. Register an application + mappings"]
+    A["1. Prerequisites<br/>(AWS account, tools, S3 state bucket)"] --> B["2. Configure variables<br/>(infra/env/&lt;env&gt;.tfvars)"]
+    B --> C["3. Configure state backends<br/>(one per stack)"]
+    C --> D["4. make deploy-dev"]
+
+    subgraph D1 ["4. What deploy-dev runs, in order"]
+      D --> D2["registry stack: ECR repos"]
+      D2 --> D3["build + push 8 Lambda images<br/>(digests written to tfvars)"]
+      D3 --> D4["gateway stack: Lambdas, API GW,<br/>Cognito, CloudFront, KMS, DynamoDB, WAF"]
+      D4 --> D5["demo stack: SAML SP + OIDC RP"]
+      D5 --> D6["admin console → S3 → CloudFront"]
     end
-    M --> N["9. Verify (metadata / discovery) &amp; test SSO"]
+
+    D6 --> E["5. Post-install configuration"]
+
+    subgraph E1 ["5. Post-install (one-time)"]
+      E --> F["5a. Create first admin user"]
+      F --> G["5b. Sign in to the console"]
+      G --> H["5c. Add an identity source (Cognito pool)"]
+      H --> I["5d. Register an application + mappings"]
+    end
+
+    I --> J["6. Verify (metadata / discovery) &amp; test SSO"]
 ```
 
 ---
 
-## 1. Prerequisites
+## 1. Before you start
 
-- An **AWS account** and credentials configured for the AWS CLI (a named profile or `default`).
-  The deploying principal needs permissions to create IAM, Lambda, ECR, API Gateway, Cognito,
-  CloudFront, WAF, KMS, DynamoDB, S3, SNS, and CloudWatch resources.
-- **Tools:**
-  - [Terraform](https://developer.hashicorp.com/terraform/downloads) `>= 1.7`
-  - [Go](https://go.dev/dl/) `1.26+`
-  - [Docker](https://docs.docker.com/get-docker/) with **buildx** (the Lambdas are arm64 container images)
-  - [Node.js](https://nodejs.org/) `18+` (admin console build)
-  - [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
-- Clone the repo and set a couple of shell variables used throughout:
+Install the tools, check the account permissions, and create the S3 state bucket as
+described in [Prerequisites](prerequisites.md).
+
+- **Clone with symlinks enabled.** Each stack's `variables.tf` is a git symlink to
+  `infra/variables.tf`. If `git config core.symlinks` is `false` (the default on Windows),
+  the symlinks are checked out as one-line text files and every `terraform init` fails with
+  *"Argument or block definition required … ../variables.tf"*. See
+  [Troubleshooting](#troubleshooting).
 
 ```bash
 git clone <this-repo> && cd <this-repo>
-export AWS_PROFILE=default          # your AWS CLI profile
-export AWS_REGION=us-east-1         # the region you will deploy to
 export ENV=dev                      # environment name: dev | staging | prod
+export PROFILE=default              # your AWS CLI profile
+export REGION=us-east-1             # the region you will deploy to
 ```
 
-> **State backend:** the Terraform config uses a **local** backend by default
-> (`infra/versions.tf` → `backend "local" {}`), so state is stored on your machine — no
-> S3 bucket required to get started. For team/production use, configure an S3 backend (see
-> [Remote state](#remote-state-optional)).
+> **Pass the profile and region to `make` on the command line.** The Makefile sets
+> `AWS_PROFILE := default` and `AWS_REGION := us-east-1`, which override variables exported
+> in your shell. Run `make <target> AWS_PROFILE=$PROFILE AWS_REGION=$REGION`, as every
+> command below does.
 
 ## 2. Configure variables
 
-Create your variables file from the dev example and edit the required values:
+Create your variables file from the example and edit the values:
 
 ```bash
-cp infra/env/dev.tfvars infra/env/$ENV.tfvars
+cp infra/env/dev.tfvars.example infra/env/$ENV.tfvars
 ```
 
-Set these (only the first four are **required** — the rest have sensible defaults):
+All three stacks read this one file. Set at least these:
 
 ```hcl
 environment    = "dev"                              # must match $ENV
 owner          = "you@example.com"                  # tag value
-aws_region     = "us-east-1"                        # must match $AWS_REGION
-alert_email    = "ops@example.com"                  # operational alerts (SNS)
+aws_region     = "us-east-1"                        # must match $REGION
+alert_email    = "ops@example.com"                  # SNS alerts; leave "" to skip the subscription
 saml_entity_id = "https://gateway.example.com"      # the IdP entity ID this gateway advertises
+state_bucket   = "my-tfstate-bucket"                # the S3 state bucket from step 1
+state_bucket_region = "us-east-1"                   # the bucket's region; may differ from aws_region
 
-# Leave these EMPTY for a first deploy (uses the default CloudFront + API Gateway URLs).
-# Set them later if you want a custom domain via Route 53 + ACM.
+# Leave these EMPTY for a first deploy (uses the generated CloudFront URLs).
+# Set them later if you want custom domains via Route 53 + ACM.
 custom_domain  = ""
 dns_zone_name  = ""
-
-# Leave empty unless you specifically need them:
-additional_tags        = {}     # provider default_tags (customers normally omit)
-ses_from_email_address = ""      # empty = use Cognito's default email sender
 ```
 
-> If you don't have a custom domain, leave `custom_domain` and `dns_zone_name` empty — the
-> gateway is reachable at the generated CloudFront domain, which you'll get from a Terraform
-> output in step 7.
+Do not set `image_digests` by hand: `make push-function-images` (run by `make deploy-dev`)
+writes the digest of every image it pushes into this file, and the gateway deploys each
+Lambda by that digest. The remaining variables have defaults; see `infra/variables.tf`.
 
-## 3. Initialize Terraform
+## 3. Configure the state backends
 
-```bash
-cd infra
-terraform init
-cd ..
-```
-
-## 4. Bootstrap the ECR repositories
-
-The gateway runs as **8 container-image Lambdas**, and Terraform both creates their ECR
-repositories *and* defines the functions that pull `:latest` from them. On a brand-new
-account the images don't exist yet, so create the repositories first:
+Each stack has its own state object and backend config. Copy the three examples and set
+your bucket, region, and (optionally) the KMS key for state encryption:
 
 ```bash
-cd infra
-terraform apply -var-file=env/$ENV.tfvars -target=module.ecr_fn
-cd ..
-```
-
-This creates one repository per function: `cognito-saml-proxy-$ENV-<function>`.
-
-## 5. Build and push the Lambda images
-
-Build all 8 arm64 binaries, then push each as a container image to its ECR repo.
-
-```bash
-# Build the binaries (into ./bin)
-make build-all-lambdas
-
-# Log in to ECR
-ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-aws ecr get-login-password --region "$AWS_REGION" \
-  | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com"
-
-# Build + push each function image (build context is ./bin)
-for fn in saml-sso saml-slo saml-metadata oidc-authorize oidc-token oidc-discovery management-api health; do
-  docker buildx build --platform linux/arm64 --provenance=false \
-    -f "cmd/$fn/Dockerfile" \
-    -t "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/cognito-saml-proxy-$ENV-$fn:latest" \
-    --push ./bin
+for s in registry gateway demo; do
+  cp infra/env/$s.dev.backend.hcl.example infra/env/$s.$ENV.backend.hcl
 done
 ```
 
-> **Important — `--provenance=false`:** Docker buildx attaches an attestation/provenance
-> manifest list by default, which AWS Lambda **rejects** ("source image is not valid").
-> Always pass `--provenance=false` for Lambda container images.
+Keep each file's `key` as `<env>/<stack>/terraform.tfstate`: the `gateway` and `demo`
+stacks read the other stacks' state at exactly those keys. These files are gitignored.
 
-## 6. Deploy the gateway
-
-Now apply the full configuration. Lambdas will find their images in ECR:
+## 4. Deploy
 
 ```bash
-cd infra
-terraform apply -var-file=env/$ENV.tfvars
-cd ..
+make deploy-dev ENV=$ENV AWS_PROFILE=$PROFILE AWS_REGION=$REGION
 ```
 
-This provisions the Lambdas, API Gateway, Cognito user pool (+ `Admins`/`Operators`
-groups), DynamoDB tables, KMS signing/encryption keys, the S3 + CloudFront admin console
-hosting, and the WAF. CloudFront takes several minutes to deploy.
+`deploy-dev` runs these targets in order. You can also run them one at a time:
 
-## 7. Build and deploy the admin console
+| Target | What it does |
+|--------|--------------|
+| `registry-init`, `registry-apply` | Creates one ECR repository per Lambda function, plus two for the demo apps. Repositories are **immutable**: a tag can be pushed once. |
+| `push-function-images` | Builds the 8 arm64 binaries, pushes each image tagged with the current git commit, and writes every image digest to `infra/env/$ENV.tfvars` under `image_digests`. |
+| `push-demo-images` | Builds and pushes the demo SAML SP and OIDC RP images. |
+| `gateway-init`, `gateway-apply` | Provisions the Lambdas (by digest), API Gateway, the Cognito user pool (with `Admins`/`Operators` groups), DynamoDB tables, KMS keys, Secrets Manager secrets, the S3 + CloudFront console hosting, and AWS WAF. CloudFront takes several minutes. |
+| `demo-init`, `demo-apply` | Deploys the demo SAML SP and OIDC RP (Lambda + API Gateway + CloudFront each). |
+| `frontend-deploy` | Builds the admin console from the gateway stack's outputs, syncs it to S3, and invalidates CloudFront. |
 
-The console is a static SPA configured at build time from Terraform outputs:
+> The `*-apply` targets run `terraform apply -auto-approve`. To review changes first, run
+> `make tf-plan STACK=gateway ENV=$ENV AWS_PROFILE=$PROFILE` before applying.
 
-```bash
-make frontend-build        # reads cognito_* outputs and builds frontend/dist
-
-ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-aws s3 sync frontend/dist/ "s3://cognito-saml-proxy-$ENV-frontend-$ACCOUNT" --delete --region "$AWS_REGION"
-aws cloudfront create-invalidation \
-  --distribution-id "$(cd infra && terraform output -raw cloudfront_distribution_id)" \
-  --paths "/*" --region "$AWS_REGION"
-```
-
-Get your console URL:
+Get your gateway URL (the console is served from the same CloudFront distribution):
 
 ```bash
-cd infra && terraform output -raw cloudfront_domain_name && cd ..
-# -> https://dxxxxxxxxxxxxx.cloudfront.net   (or your custom_domain if you set one)
+terraform -chdir=infra/gateway output -raw base_url
+# -> https://dxxxxxxxxxxxxx.cloudfront.net   (or https://<custom_domain> if you set one)
 ```
 
 ---
 
-## 8. Post-install configuration
+## 5. Post-install configuration
 
-Terraform does **not** seed an admin user or a tenant — you create the first ones here.
+Terraform does **not** create an admin user. The gateway creates a built-in tenant named
+`default` the first time the management API or the `saml-sso` function starts, and the
+gateway's own Cognito app client is registered with the callback URLs for that tenant, so
+this walkthrough uses `default`.
 
-> **Signing certificate (required, or the console 500s):** the `management-api` and
-> `saml-metadata` Lambdas read the SAML signing certificate at startup and exit if it is
-> missing. Only the `saml-sso` Lambda creates it, on its first cold start. On a fresh deploy
-> the cert does not exist yet, so opening the console before any SSO traffic returns **500**
-> on every DB-backed call. Invoke `saml-sso` once to seed it (any SAML SSO flow also works).
-
-> **Shortcut:** after the stacks are up, run
-> `make post-install ENV=$ENV AWS_PROFILE=$AWS_PROFILE ADMIN_EMAIL=you@example.com`.
-> It seeds the signing certificate (above) and adds your user to the `Admins` group — the two
-> bootstrap steps that otherwise cause 500s (missing cert) then 403s (missing group). Both are
-> idempotent. You still create the tenant (8c) and identity source/app (8d–8e) yourself.
-
-### 8a. Create your first admin user
+### 5a. Create your first admin user
 
 The Cognito pool is admin-create-only, so create the user via the CLI, give it a permanent
-password (no email needed), set its tenant, and add it to the `Admins` group. Pick a tenant
-slug now (e.g. `acme`) — it must match the tenant you create in 8c.
+password (no email needed), and set its tenant:
 
 ```bash
 POOL=$(terraform -chdir=infra/gateway output -raw cognito_user_pool_id)
 ADMIN_EMAIL="admin@example.com"
-TENANT_SLUG="acme"
 
 aws cognito-idp admin-create-user --user-pool-id "$POOL" --username "$ADMIN_EMAIL" \
-  --message-action SUPPRESS --region "$AWS_REGION" \
+  --message-action SUPPRESS --region "$REGION" --profile "$PROFILE" \
   --user-attributes Name=email,Value="$ADMIN_EMAIL" Name=email_verified,Value=true \
-                    Name=custom:tenant_id,Value="$TENANT_SLUG"
+                    Name=custom:tenant_id,Value=default
 
 aws cognito-idp admin-set-user-password --user-pool-id "$POOL" --username "$ADMIN_EMAIL" \
-  --password 'ChangeMe!Strong1' --permanent --region "$AWS_REGION"
-
-aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL" --username "$ADMIN_EMAIL" \
-  --group-name Admins --region "$AWS_REGION"
+  --password '<a-strong-password>' --permanent --region "$REGION" --profile "$PROFILE"
 ```
 
-> RBAC: `Admins` can read **and** write; `Operators` is read-only. The console scopes you to
-> the tenant in your `custom:tenant_id` claim.
-
-### 8b. Sign in to the console
-
-Open the CloudFront URL from step 7, sign in with the admin email + password above. (The
-console authenticates against the gateway's Cognito pool via the hosted UI.)
-
-### 8c. Create a tenant
-
-Create a tenant whose **slug matches** the `custom:tenant_id` you set (`acme`). You can do
-this from the console's tenant management, or via the API:
+Then run the post-install target, which seeds the SAML signing certificate and adds the
+user to `Admins`:
 
 ```bash
-API=$(terraform -chdir=infra/gateway output -raw api_endpoint)
-# Obtain an admin access token (e.g. via the console session) and:
-curl -X POST "$API/api/v1/tenants" -H "Authorization: Bearer <ADMIN_ID_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"slug":"acme","displayName":"Acme Corp"}'
+make post-install ENV=$ENV AWS_PROFILE=$PROFILE AWS_REGION=$REGION ADMIN_EMAIL="$ADMIN_EMAIL"
 ```
 
-### 8d. Add an identity source
+See [Post-install](post-install.md) for why both steps are needed.
+
+> RBAC: `Admins` can read **and** write; `Operators` is read-only. The console scopes you to
+> the tenant in your `custom:tenant_id` claim (users without the claim fall back to `default`).
+> The pool enforces MFA, so the first sign-in asks you to register an authenticator app.
+
+### 5b. Sign in to the console
+
+Open the `base_url` from step 4 and sign in with the admin email and password above. The
+console authenticates against the gateway's Cognito pool through Managed Login.
+
+### 5c. Add an identity source
 
 In the console: **Identity Sources → Add source**. An identity source is the Cognito user
-pool that authenticates your *end users*. For a quick test you can point it at the gateway's
-own pool; in production use a dedicated end-user pool. Supply its pool ID, region, app
-client ID (public, with `ALLOW_USER_SRP_AUTH` + `ALLOW_REFRESH_TOKEN_AUTH`), and hosted-UI
-domain. (Each section has an **Info** link explaining the fields.)
+pool that authenticates your *end users*. For a quick test, point it at the gateway's own
+pool and its backend app client:
 
-### 8e. Register an application
+```bash
+terraform -chdir=infra/gateway output -raw cognito_user_pool_id
+terraform -chdir=infra/gateway output -raw cognito_backend_client_id
+terraform -chdir=infra/gateway output -raw cognito_domain
+```
+
+In production use a dedicated end-user pool with a public app client
+(`ALLOW_USER_SRP_AUTH` + `ALLOW_REFRESH_TOKEN_AUTH`). That client's callback URLs must
+include `<base_url>/t/<tenant>/saml/acs` and `<base_url>/t/<tenant>/oidc/callback` for every
+tenant that uses it, or Cognito rejects the sign-in redirect. (Each section has an **Info**
+link explaining the fields.)
+
+### 5d. Register an application
 
 In the console: **Applications → Register new**. Choose SAML or OIDC, bind the identity
-source, and configure endpoints, claim/role mappings, and (optionally) a custom login page.
-The **Integration** tab then gives you the metadata URL / discovery URL and certificate to
-hand to the relying party.
+source, and configure endpoints, claim/role mappings, and (optionally) a
+[custom login page](../guides/custom-login.md). The **Integration** tab then gives you
+the metadata URL / discovery URL and certificate to hand to the relying party.
+
+### Adding more tenants
+
+Create a tenant from the console's tenant menu (**Create tenant…**) or with the API
+(`POST /api/v1/tenants` with an `Admins` ID token). For each new tenant slug, add its
+`/t/<slug>/saml/acs` and `/t/<slug>/oidc/callback` URLs to the identity source's app
+client callback URLs, and set `custom:tenant_id` to the slug on that tenant's admins.
 
 ---
 
-## 9. Verify
+## 6. Verify
 
 ```bash
-BASE=$(cd infra && terraform output -raw cloudfront_domain_name)   # or your custom domain
+BASE=$(terraform -chdir=infra/gateway output -raw base_url)
 
-# SAML IdP metadata for your tenant
-curl -s "$BASE/t/acme/saml/metadata" | head
+# SAML IdP metadata for the default tenant
+curl -s "$BASE/t/default/saml/metadata" | head
 
-# OIDC discovery for your tenant
-curl -s "$BASE/t/acme/oidc/.well-known/openid-configuration" | jq .
+# OIDC discovery for the default tenant
+curl -s "$BASE/t/default/oidc/.well-known/openid-configuration" | jq .
 ```
 
-Then run an end-to-end SSO from your application (or the optional demo apps below).
+Then run an end-to-end SSO from your application, or from the demo apps:
+
+```bash
+terraform -chdir=infra/demo output -raw demo_saml_sp_url
+terraform -chdir=infra/demo output -raw demo_oidc_rp_url
+```
+
+Register each demo app in the console (SAML for the SP, OIDC for the RP) before you test it.
 
 ### Optional: the Custom UI demo
 
-A standalone React demo that shows building your own login UI against the gateway lives in
-[`examples/custom-ui`](https://github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/tree/main/examples/custom-ui) — deploy it separately (S3 +
-CloudFront) to exercise login, registration, password reset, token refresh, and the
-IdP-initiated app launcher.
+A standalone React demo that shows building your own login UI against Cognito lives in
+[`examples/custom-ui`](https://github.com/aws-samples/sample-aws-cognito-oidc-saml-proxy/tree/main/examples/custom-ui).
+Deploy it separately (S3 + CloudFront) to exercise login, registration, password reset,
+token refresh, the gateway's custom login page flow, and the IdP-initiated app launcher.
+See [Custom login pages](../guides/custom-login.md).
 
 ---
 
-## Remote state (optional)
-
-For shared/team use, store Terraform state in S3 instead of locally:
-
-1. Create a state bucket (one-time): `aws s3 mb s3://my-tfstate-bucket --region $AWS_REGION`.
-2. Create `infra/env/$ENV.backend.hcl`:
-   ```hcl
-   bucket = "my-tfstate-bucket"
-   key    = "cognito-saml-proxy/dev/terraform.tfstate"
-   ```
-3. Change `infra/versions.tf` `backend "local" {}` to `backend "s3" {}`, then
-   `terraform init -backend-config=env/$ENV.backend.hcl -migrate-state`.
-
-## Teardown
-
-Tear everything down with the centralized target (mirror of `make deploy-dev`,
-destroys in reverse order: demo → gateway → registry):
+## 7. Teardown
 
 ```bash
-make destroy-dev ENV=$ENV AWS_PROFILE=$AWS_PROFILE
+make destroy-dev ENV=$ENV AWS_PROFILE=$PROFILE AWS_REGION=$REGION
 ```
 
-Or destroy a single stack at a time (same reverse order):
-
-```bash
-make demo-destroy ENV=$ENV
-make gateway-destroy ENV=$ENV   # empties the frontend + IaC-template buckets first
-make registry-destroy ENV=$ENV  # must be last: other stacks read it via remote_state
-```
-
-> The infra is split into three independently-stated stacks (`infra/registry`,
-> `infra/gateway`, `infra/demo`), so there is no single root to destroy — use the
-> targets above. `make gateway-destroy` empties the frontend and IaC-template S3
-> buckets before destroying, since neither sets `force_destroy`. ECR repos use
-> `repository_force_delete` in non-prod, so images are removed automatically. If a
-> WAF web ACL is slow to delete because CloudFront is still disassociating, re-run
-> the same target a few minutes later.
+See [Teardown](teardown.md) for the per-stack order and notes.
 
 ## Troubleshooting
 
 | Symptom | Cause / Fix |
 |---------|-------------|
-| `terraform apply` fails creating a Lambda: *source image does not exist* | You skipped the bootstrap. Run step 4 (ECR), step 5 (push images), then step 6. |
-| Lambda update fails: *source image is not valid* / manifest error | The image was built without `--provenance=false`. Rebuild/push with that flag (step 5). |
-| Console loads but API calls 401/403 | Your user isn't in `Admins`/`Operators`, or its `custom:tenant_id` doesn't match an existing tenant (8a/8c). |
-| Cognito sign-up/reset emails never arrive | New accounts have SES in sandbox. For admin login this is fine (we set the password directly in 8a). Verify an SES identity and set `ses_from_email_address` for real email. |
+| `terraform init` or `validate` fails: *Argument or block definition required … `../variables.tf`* | The stack's `variables.tf` symlink was checked out as a text file. Run `git config core.symlinks true`, then `git checkout -- infra/registry/variables.tf infra/gateway/variables.tf infra/demo/variables.tf`. |
+| `terraform init` asks for `bucket`, `key`, and `region` | The stack's `infra/env/<stack>.<env>.backend.hcl` is missing. Create it (step 3). |
+| `gateway` or `demo` apply fails reading remote state | `state_bucket` (and `state_bucket_region`, if the bucket is in another region) is not set in the tfvars, or the backend `key` values do not follow `<env>/<stack>/terraform.tfstate`. |
+| `push-function-images` fails: *tag … already exists* | ECR repos are immutable and images are tagged with the git commit. Commit your change (or check out a new commit) before pushing again. |
+| `gateway-apply` fails: *Invalid index* on `var.image_digests[each.key]` | `image_digests` in the tfvars is missing a function. The gateway deploys by digest only, so run `make push-function-images` first. |
+| Lambda create fails: *decreases account's UnreservedConcurrentExecution below its minimum* | Every function reserves `lambda_reserved_concurrency` (default 50, so 400 in total). New accounts can have a lower concurrency quota. Request a quota increase or set `lambda_reserved_concurrency = -1`. |
+| Console loads but every data call returns 500 | The SAML signing certificate hasn't been created yet. Run `make post-install` (5a). |
+| Console loads but API calls return 401/403 | Your user isn't in `Admins`/`Operators` (run `make post-install` with `ADMIN_EMAIL`, then sign out and back in), or its `custom:tenant_id` doesn't match an existing tenant (5a). |
+| Sign-in redirect fails with *redirect_mismatch* | The identity source's app client is missing the `/t/<tenant>/saml/acs` or `/t/<tenant>/oidc/callback` URL for the tenant you used (5c). |
+| Cognito sign-up/reset emails never arrive | New accounts have SES in sandbox. For admin login this is fine (the password is set directly in 5a). Verify an SES identity and set `ses_from_email_address` for real email. |
 | `enable_public_iac_templates` apply error | Leave it `false` in accounts that enforce S3 Block Public Access. |

@@ -30,6 +30,7 @@ deploying. Common targets are grouped below. Most deploy/teardown targets accept
 | Command | Description |
 |---------|-------------|
 | `make deploy-dev` | Full ordered deploy: registry → images → gateway → demo → frontend |
+| `make tf-plan STACK=<stack>` | Plan one stack (`registry`, `gateway`, or `demo`) |
 | `make post-install` | Seed the SAML signing cert and add `ADMIN_EMAIL` to the `Admins` group |
 | `make frontend-deploy` | Build the console, sync to S3, invalidate CloudFront |
 

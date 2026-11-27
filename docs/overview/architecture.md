@@ -47,8 +47,11 @@ add a tile, recolour it, or redraw it. Size it like other resource icons, and la
 - **CloudFront** — the single public entry point. It serves the admin console SPA
   from S3 and routes API and protocol traffic (`/api`, `/t/*`, `/login`) to API
   Gateway. It also applies the Content Security Policy and other response headers.
-- **AWS WAF** (us-east-1, attached at the edge) — inspects inbound requests with the
-  OWASP Core Rule Set and endpoint-specific rate limiting before traffic is served.
+- **AWS WAF** — a web ACL on CloudFront (created in us-east-1) with the AWS managed Core
+  rule set, Known bad inputs, and Amazon IP reputation list rule groups, plus
+  endpoint-specific rate limits. A regional web ACL with the same rule groups is created
+  but not associated, because WAFv2 cannot attach to an API Gateway HTTP API stage. The
+  CloudFront origin-verify secret keeps traffic on CloudFront.
 
 ## Region — us-east-1
 
@@ -63,32 +66,37 @@ Core regional resources sitting behind the edge.
   console, and it acts as an upstream identity source whose users and `cognito:groups`
   are federated out as SAML assertions or OIDC tokens.
 - **ECR** — holds the container images for the Lambda functions (one repository per
-  function: 8 gateway + 2 demo = 10 total). Lambda pulls its image from ECR at deploy
-  time.
+  function: 8 gateway + 2 demo = 10 total), in the separate `registry` Terraform stack.
+  The repositories are immutable, and each gateway Lambda deploys by image digest. Lambda
+  pulls its image from ECR at deploy time.
 
 ### Lambda — per-capability functions (arm64 containers)
 
 Each capability is an independent ARM64 container Lambda, invoked by API Gateway:
 
-- **saml-sso** — handles `/saml/sso` and the ACS callback. Reads tenant/app config and
-  session state, signs the SAML assertion with KMS, and looks up the user and groups
-  from Cognito. Writes audit steps to CloudWatch Logs.
+- **saml-sso** — handles `/saml/sso`, the Cognito callback (`/saml/acs`), custom login
+  completion (`/saml/login/complete`), and IdP-initiated SSO (`/saml/idp-initiate`). Reads
+  tenant/app config and session state, signs the SAML assertion with KMS, and looks up the
+  user and groups from Cognito. Writes audit steps to CloudWatch Logs.
 - **saml-slo** — front-channel Single Logout (`/saml/slo`).
 - **saml-metadata** — serves IdP `<EntityDescriptor>` metadata (`/saml/metadata`).
-- **oidc-authorize** — OIDC/OAuth2 authorization endpoint.
-- **oidc-token** — token endpoint; signs issued JWTs with KMS (RS256).
-- **oidc-discovery** — discovery document and JWKS (`/.well-known`).
+- **oidc-authorize** — OIDC/OAuth2 authorization endpoint, the Cognito callback, and
+  custom login completion (`/oidc/login/complete`).
+- **oidc-token** — token, introspection, and revocation endpoints; signs issued JWTs
+  with KMS (RS256).
+- **oidc-discovery** — discovery document, JWKS, UserInfo, and end-session endpoints.
 - **management-api** — backs the admin console; all routes require a valid Cognito JWT.
   Performs CRUD on the config table and writes IaC templates to S3.
-- **health** — health/synthetic check endpoint, invoked on a schedule by EventBridge.
+- **health** — `/health`; EventBridge invokes it every 5 minutes as a synthetic check.
 
 ### Data stores
 
 - **DynamoDB — config (single-table)** — all tenant, identity-source, application,
   SAML/OIDC config, claim-mapping and role-mapping entities, keyed by composite
   `PK`/`SK`. Encrypted at rest with the symmetric KMS encryption key.
-- **DynamoDB — session (TTL)** — short-lived flow/session state, expired automatically
-  via DynamoDB TTL.
+- **DynamoDB — session (TTL)** — short-lived protocol state: AuthnRequest replay guards,
+  SAML sessions, pending custom logins, OIDC requests, codes, and tokens, and a 24-hour
+  copy of audit steps. Items expire automatically via DynamoDB TTL.
 - **S3 — IaC templates** — stores generated infrastructure-as-code templates produced
   by the management API for onboarding.
 
@@ -96,10 +104,11 @@ Each capability is an independent ARM64 container Lambda, invoked by API Gateway
 
 - **KMS — signing (RSA)** — asymmetric RSA key used to sign SAML responses/assertions
   (RSA-SHA256) and OIDC tokens (RS256).
-- **KMS — backup signing (optional)** — optional secondary signing key for rotation
-  or key-backup scenarios.
-- **KMS — encryption (symmetric)** — symmetric key for server-side encryption of the
-  DynamoDB config table, the Secrets Manager secrets below, and other data at rest.
+- **KMS — backup signing** — second RSA signing key, created by default
+  (`enable_backup_signing_key`). Promoting the backup certificate rolls signing to this key.
+- **KMS — encryption (symmetric)** — symmetric key for server-side encryption of both
+  DynamoDB tables, the audit log group, the Secrets Manager secrets below, and other data
+  at rest.
 
 ### Shared secrets (Secrets Manager)
 
@@ -116,17 +125,19 @@ placed in the function environment, never the value.
 
 ### Observability & ops
 
-- **CloudWatch Logs** — central audit trail; Lambda functions write structured flow
-  audit events here.
-- **CloudWatch Alarms** — monitor API Gateway and DynamoDB metrics.
+- **CloudWatch Logs** — central audit trail (`/identity-gateway/audit`, 365-day retention,
+  KMS-encrypted); Lambda functions write structured flow audit events here.
+- **CloudWatch Alarms** — API Gateway 4xx and 5xx errors, DynamoDB throttles, audit-log
+  write failures, and signing-certificate expiry.
 - **SNS** — delivers email alerts when an alarm fires.
 - **EventBridge** — scheduled rule that invokes the health Lambda every 5 minutes.
 
 ### Demo relying parties (optional)
 
 - **Demo SAML SP** and **Demo OIDC RP** — optional sample apps (each Lambda + API
-  Gateway + CloudFront) that initiate SSO through the gateway to demonstrate the
-  end-to-end flow. Shown dashed because they are optional.
+  Gateway + CloudFront), deployed by the separate `demo` Terraform stack, that initiate
+  SSO through the gateway to demonstrate the end-to-end flow. Shown dashed because they
+  are optional.
 
 ## Cognito Custom UI Demo — OPTIONAL (separate Terraform stack)
 
@@ -138,8 +149,10 @@ An optional, separately deployed stack demonstrating a custom Cognito login UI:
   CloudFront with OAC.
 
 The custom UI authenticates end users directly against the Cognito user pool
-(SRP/refresh) and then hands off to the gateway as an app launcher. This whole cluster
-is dashed/optional and lives in its own Terraform stack.
+(SRP/refresh) and then hands off to the gateway, either as an application's custom login
+page (it posts the ID token to `/login/complete`) or as an IdP-initiated app launcher.
+See [Custom login pages](../guides/custom-login.md). This whole cluster is
+dashed/optional and lives in its own Terraform stack (`examples/custom-ui/infra`).
 
 ## Request flow summary
 

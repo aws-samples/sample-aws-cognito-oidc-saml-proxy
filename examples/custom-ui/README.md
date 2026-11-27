@@ -29,7 +29,7 @@ reference customers can read and adapt; it is **not** production-hardened.
 This demo uses the **same hosting pattern as the Federation Gateway console**:
 
 ```
-Browser  ──>  CloudFront (+ WAF IP allowlist)  ──>  private S3 bucket (OAC)
+Browser  ──>  CloudFront (+ optional WAF IP allowlist)  ──>  private S3 bucket (OAC)
                                                        index.html, assets, config.json
 ```
 
@@ -110,8 +110,9 @@ VITE_PASSKEYS_ENABLED=true
 ```bash
 cd infra
 cp terraform.tfvars.example terraform.tfvars
-# edit: cognito_user_pool_id, cognito_client_id, and allowed_cidrs (your IP)
-#   get your IP:  curl https://checkip.amazonaws.com   then use <ip>/32
+# edit: cognito_user_pool_id, cognito_client_id, and (to use it with the gateway)
+#   gateway_base_url and gateway_tenant. Optionally set allowed_cidrs to your IP:
+#   curl https://checkip.amazonaws.com   then use <ip>/32
 ```
 
 Then from `examples/custom-ui/`:
@@ -122,8 +123,8 @@ make deploy
 
 `make deploy` builds the SPA, runs `terraform apply` (private bucket + CloudFront +
 WAF + config.json), syncs the assets to S3 (excluding the Terraform-managed
-`config.json`), and invalidates CloudFront. It prints the CloudFront URL — reachable
-only from `allowed_cidrs`. Tear down with `make destroy`.
+`config.json`), and invalidates CloudFront. It prints the CloudFront URL, which is
+public unless you set `allowed_cidrs`. Tear down with `make destroy`.
 
 > **Access control (optional):** by default the demo is **public** (no WAF) so
 > customers can use it. To restrict it to specific IPs, set `allowed_cidrs` /
@@ -134,9 +135,11 @@ only from `allowed_cidrs`. Tear down with `make destroy`.
 
 This app authenticates against the same pool the gateway uses as an identity
 source, so it can serve as a per-application custom login page and IdP-initiated
-launcher. See the in-app **Configuration** page for the exact values
-(`customLoginUrl`, `trustedLoginRedirectUris`, and the session-establish / idp-initiate
-endpoints) for your deployment.
+launcher (see [Custom login pages](../../docs/guides/custom-login.md)). The in-app
+**Configuration** page shows the exact values for your deployment: `customLoginUrl`,
+`trustedLoginRedirectUris`, and the session-establish (`/login/complete`) and
+`/saml/idp-initiate` endpoints. Use the identity source's app client ID as
+`cognito_client_id`: the gateway accepts only ID tokens issued to that client.
 
 Two gateway-side protections shape how this app must be registered:
 

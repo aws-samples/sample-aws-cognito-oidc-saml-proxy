@@ -80,5 +80,6 @@ nav:
   - Guides:
       - Local development: guides/local-development.md
       - Administration console: guides/admin-console.md
+      - Custom login pages: guides/custom-login.md
   - Reference:
       - Make commands: reference/make-commands.md

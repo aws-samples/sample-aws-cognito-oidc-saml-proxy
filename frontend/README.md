@@ -97,8 +97,9 @@ development.
 |------|------|-------------|
 | Dashboard | `/` | Overview metrics, recent audit events, gateway health |
 | Identity Sources | `/identity-sources` | Manage Amazon Cognito user pool connections |
+| Identity Source Detail | `/identity-sources/:id` | Pool, app client, and domain settings for one source |
 | Applications | `/applications` | Manage SAML SP and OIDC RP registrations |
-| App Detail | `/applications/:id` | Protocol config, claim mappings, integration guides |
+| App Detail | `/applications/:id` | Protocol config, claim mappings, custom login page, integration guides |
 | Register App | `/applications/new` | Register a new SAML or OIDC application |
 | Analytics | `/analytics` | Authentication statistics |
 | Audit Log | `/audit` | SSO/SLO event trail |

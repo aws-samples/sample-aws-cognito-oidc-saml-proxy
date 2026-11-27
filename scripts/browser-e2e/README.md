@@ -12,11 +12,11 @@ Cognito path end to end.
 
 ```bash
 cd scripts/browser-e2e
-npm i -D @playwright/test
+npm ci
+npx playwright install chromium
 
-# Endpoints default to the dev validation deploy; override for other envs.
-# Pull them from Terraform outputs:
-export GATEWAY_URL=https://$(terraform -chdir=../../infra/gateway output -raw cloudfront_domain_name)
+# Point the suite at your deployment, using the Terraform outputs:
+export GATEWAY_URL=$(terraform -chdir=../../infra/gateway output -raw base_url)
 export DEMO_SP_URL=$(terraform -chdir=../../infra/demo output -raw demo_saml_sp_url)
 export DEMO_RP_URL=$(terraform -chdir=../../infra/demo output -raw demo_oidc_rp_url)
 export COGNITO_HOST=$(terraform -chdir=../../infra/gateway output -raw cognito_domain | sed 's|https://||')
@@ -24,12 +24,12 @@ export COGNITO_HOST=$(terraform -chdir=../../infra/gateway output -raw cognito_d
 npx playwright test live-e2e.spec.js --workers=4
 ```
 
-> **Note:** Do not run `npx playwright install chromium` on this workstation — it
-> downloads the x86 `headless_shell` bundle which fails with missing shared libs on
-> aarch64. The config auto-detects the working native arm64 binary at
-> `~/.cache/ms-playwright/chromium-1228/chrome-linux/chrome` (installed via the
-> headless-chrome fix) and sets `LD_LIBRARY_PATH=/tmp/browser-e2e/libs`
-> automatically.
+> **Note (Linux arm64 hosts):** Playwright's `chromium_headless_shell` bundle can fail
+> there with missing shared libraries. If a full Chromium build exists at
+> `~/.cache/ms-playwright/chromium-1228/chrome-linux/chrome`, `playwright.config.js`
+> uses it instead, and adds `/tmp/browser-e2e/libs` to `LD_LIBRARY_PATH` when that
+> directory holds the extracted dependencies. On other hosts Playwright uses its own
+> browser.
 
 ## What it asserts
 

@@ -10,7 +10,8 @@ API layer, cryptographic signing, and the request-handling code.
 - **Role-based access control**: management operations require membership in the `Admins`
   (read + write) or `Operators` (read-only) Cognito group. The console scopes each admin to
   the tenant in their `custom:tenant_id` claim.
-- **Admin-only user creation** in the Amazon Cognito user pool (no self-signup).
+- **Admin-only user creation** in the Amazon Cognito user pool (no self-signup), and MFA
+  (authenticator app) is required.
 
 ## Cryptography
 
@@ -27,8 +28,8 @@ API layer, cryptographic signing, and the request-handling code.
 
 ## Request protection
 
-- **AWS WAF** with the OWASP Core Rule Set, AWS managed rule groups (Known Bad Inputs, IP
-  reputation), and endpoint-specific rate limiting.
+- **AWS WAF** on the CloudFront distribution with the AWS managed Core rule set, Known bad
+  inputs, and Amazon IP reputation list rule groups, plus endpoint-specific rate limits.
 - **CSRF protection** via OAuth2 `state` parameters and PKCE.
 - **Login-binding cookies** for custom login pages: the redirect to the page sets a
   short-lived, signed `__Host-` cookie tied to the flow's `state`, and the hand-back to

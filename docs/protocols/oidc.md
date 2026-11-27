@@ -33,6 +33,7 @@ sequenceDiagram
 | Token introspection endpoint ([RFC 7662](https://datatracker.ietf.org/doc/html/rfc7662)) | — |
 | Cross-pool federation (one gateway, multiple Cognito pools) | One pool per app client set |
 | Single gateway signing key (KMS) with an optional backup key for rotation | AWS-managed pool signing keys |
+| Per-app custom login page, with the authorization code flow intact | Managed Login, or a custom UI that calls the user pool API directly |
 | Unified SAML + OIDC management API and UI | Separate console/API per protocol |
 | Raw `cognito:groups` passed as `groups` claim | Same (`cognito:groups` in ID token) |
 
@@ -104,3 +105,4 @@ clamped on the token path rather than honoured verbatim.
 | `/t/{tenant}/oidc/keys` | JSON Web Key Set ([RFC 7517](https://datatracker.ietf.org/doc/html/rfc7517)) |
 | `/t/{tenant}/oidc/revoke` | Token revocation ([RFC 7009](https://datatracker.ietf.org/doc/html/rfc7009)) |
 | `/t/{tenant}/oidc/end_session` | RP-Initiated Logout ([OpenID Connect RP-Initiated Logout 1.0](https://openid.net/specs/openid-connect-rpinitiated-1_0.html)) |
+| `/t/{tenant}/oidc/login/complete` | Custom login page hand-back (ID token + `state`); see [Custom login pages](../guides/custom-login.md) |
