@@ -4,11 +4,15 @@ You can run the gateway and the demo apps entirely on your machine — no AWS ac
 Local mode uses an in-memory store and a mock KMS signer.
 
 ```bash
-make run-local      # Gateway on :8080 (in-memory store, mock KMS)
+make run-local      # Gateway on 127.0.0.1:8080 (in-memory store, mock KMS)
 make test-sp        # SAML SP demo on :8081
 make test-rp        # OIDC RP demo on :8082
 make frontend-dev   # Admin console dev server on :3000
 ```
+
+In local mode (`PROXY_ENVIRONMENT=local`) the gateway listens on `127.0.0.1` only, because the
+management API runs without authentication there. Other machines on your network, and
+port mappings from a container or VM host, cannot reach it, and no setting widens the bind.
 
 ## Tests
 

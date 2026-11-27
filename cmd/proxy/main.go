@@ -354,9 +354,10 @@ func main() {
 		chiAdapter := chiadapter.NewV2(router.(*chi.Mux))
 		lambda.Start(chiAdapter.ProxyWithContextV2)
 	} else {
-		// Running locally — standard HTTP server
+		// Running locally — standard HTTP server. In local mode it listens on
+		// loopback only, because the management API runs without auth there.
 		srv := &http.Server{
-			Addr:         ":" + cfg.Port,
+			Addr:         cfg.ListenAddr(),
 			Handler:      router,
 			ReadTimeout:  10 * time.Second,
 			WriteTimeout: 30 * time.Second,
@@ -368,6 +369,7 @@ func main() {
 
 		go func() {
 			slog.Info("starting server",
+				"addr", srv.Addr,
 				"port", cfg.Port,
 				"environment", cfg.Environment,
 				"openapi_spec", "http://localhost:"+cfg.Port+"/openapi.json")

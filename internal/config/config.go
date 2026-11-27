@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 )
@@ -202,6 +203,18 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// ListenAddr is the address the standalone HTTP server (cmd/proxy outside
+// Lambda) listens on. In local dev the management API runs with authentication
+// disabled, so the server binds to loopback only and other machines on the
+// network cannot reach it. There is deliberately no override. Every other
+// environment keeps the all-interfaces ":<port>" bind.
+func (c *Config) ListenAddr() string {
+	if c.Environment.IsLocal() {
+		return net.JoinHostPort("127.0.0.1", c.Port)
+	}
+	return ":" + c.Port
 }
 
 // env retrieves an environment variable value. Returns empty string if not set.

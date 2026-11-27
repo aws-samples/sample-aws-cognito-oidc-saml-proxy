@@ -208,6 +208,35 @@ func TestLoadConfig_LocalCustomPort(t *testing.T) {
 	assert.Equal(t, "http://localhost:9999", cfg.EntityID)
 }
 
+// TestListenAddr asserts the standalone server binds to loopback only in local
+// dev, where the management API runs without authentication, and keeps the
+// all-interfaces ":<port>" bind in every other environment.
+func TestListenAddr(t *testing.T) {
+	tests := []struct {
+		env  string
+		port string
+		want string
+	}{
+		{env: "local", port: "", want: "127.0.0.1:8080"},
+		{env: "local", port: "9999", want: "127.0.0.1:9999"},
+		{env: "dev", port: "9999", want: ":9999"},
+		{env: "staging", port: "9999", want: ":9999"},
+		{env: "prod", port: "", want: ":8080"},
+		{env: "prod", port: "9999", want: ":9999"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.env+"/"+tt.port, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("PROXY_ENVIRONMENT", tt.env)
+			t.Setenv("PROXY_PORT", tt.port)
+
+			cfg, err := config.Load()
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.ListenAddr())
+		})
+	}
+}
+
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("PROXY_AWS_REGION", "eu-north-1")
