@@ -130,9 +130,10 @@ locals {
   # Per-function environment variables
   # ---------------------------------------------------------------------------
   fn_common_env = {
-    PROXY_ENVIRONMENT = var.environment
-    PROXY_AWS_REGION  = var.aws_region
-    PROXY_LOG_LEVEL   = var.log_level
+    PROXY_ENVIRONMENT     = var.environment
+    PROXY_AWS_REGION      = var.aws_region
+    PROXY_LOG_LEVEL       = var.log_level
+    PROXY_AUDIT_LOG_GROUP = aws_cloudwatch_log_group.audit.name
     # CloudFront origin-verify edge secret — Secrets Manager ARN. Every
     # request-handling function fetches the secret at cold-start via
     # secretsmanager:GetSecretValue and passes the value to

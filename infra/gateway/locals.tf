@@ -6,6 +6,18 @@ locals {
   tags             = module.common.tags
   lambda_functions = module.common.lambda_functions
 
+  # Names outside name_prefix that must still be unique per account and region
+  # (or, for the Cognito domain prefix, globally). Each carries name_suffix when
+  # one is set so two instances can share an account and region; with no suffix
+  # every name is the historical one, so existing deployments are unchanged.
+  instance_name        = var.name_suffix != "" ? "${var.environment}-${var.name_suffix}" : var.environment
+  audit_log_group_name = var.name_suffix != "" ? "/identity-gateway/${var.name_suffix}/audit" : "/identity-gateway/audit"
+
+  # Map key for the scheduled health check. The EventBridge module derives the
+  # rule name from it (lambda-health-check[-<suffix>]-rule), so instances in one
+  # account and region get distinct rules. No suffix keeps the historical name.
+  health_check_rule_key = var.name_suffix != "" ? "lambda_health_check_${replace(var.name_suffix, "-", "_")}" : "lambda_health_check"
+
   # Resolve the base URL: custom domain if set, otherwise the CloudFront distribution URL.
   # All protocol flows (SAML, OIDC) must route through CloudFront for WAF protection.
   base_url = var.custom_domain != "" ? "https://${var.custom_domain}" : "https://${aws_cloudfront_distribution.main.domain_name}"

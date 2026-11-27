@@ -413,3 +413,57 @@ run "audit_write_failure_metric_and_alarm" {
     error_message = "The saml-slo audit-write-failure filter must bind to that function's own /aws/lambda/<name_prefix>-saml-slo log group."
   }
 }
+
+# Names that are unique per account and region (the audit log group and the
+# health check rule on the default event bus) keep their historical values when
+# name_suffix is empty, and carry the suffix otherwise, so two instances can
+# share an account and region. The Lambdas are told the audit group's name.
+run "shared_names_without_suffix" {
+  command = plan
+
+  assert {
+    condition     = aws_cloudwatch_log_group.audit.name == "/identity-gateway/audit"
+    error_message = "With no name_suffix the audit log group must keep its historical name."
+  }
+  assert {
+    condition     = local.health_check_rule_key == "lambda_health_check"
+    error_message = "With no name_suffix the health check rule must keep its historical key."
+  }
+  assert {
+    condition     = local.instance_name == "dev" && startswith(aws_cognito_user_pool_domain.main.domain, "fed-gw-dev-")
+    error_message = "With no name_suffix the KMS aliases and Cognito domain must keep their historical names."
+  }
+  assert {
+    condition     = local.fn_common_env["PROXY_AUDIT_LOG_GROUP"] == aws_cloudwatch_log_group.audit.name
+    error_message = "Every Lambda must receive the audit log group name in PROXY_AUDIT_LOG_GROUP."
+  }
+}
+
+run "shared_names_with_suffix" {
+  command = plan
+
+  variables {
+    name_suffix = "v2"
+  }
+
+  assert {
+    condition     = aws_cloudwatch_log_group.audit.name == "/identity-gateway/v2/audit"
+    error_message = "The audit log group name must carry name_suffix."
+  }
+  assert {
+    condition     = contains(keys(module.eventbridge.eventbridge_rule_arns), "lambda_health_check_v2")
+    error_message = "The health check rule key (and so the rule name) must carry name_suffix."
+  }
+  assert {
+    condition     = local.instance_name == "dev-v2"
+    error_message = "The KMS alias path segment must carry name_suffix (saml-proxy/dev-v2/...)."
+  }
+  assert {
+    condition     = startswith(aws_cognito_user_pool_domain.main.domain, "fed-gw-dev-v2-")
+    error_message = "The Cognito domain prefix is globally unique, so it must carry name_suffix."
+  }
+  assert {
+    condition     = local.fn_common_env["PROXY_AUDIT_LOG_GROUP"] == "/identity-gateway/v2/audit"
+    error_message = "The Lambdas must write to the suffixed audit log group."
+  }
+}

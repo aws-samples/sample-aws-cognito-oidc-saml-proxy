@@ -51,7 +51,7 @@ func init() {
 
 	// Wrap audit store with CloudWatch Logs audit logger
 	cwLogsClient := cloudwatchlogs.NewFromConfig(awsCfg)
-	auditLogger, err := audit.NewLogger(cfg.Environment, cwLogsClient, auditStore, "/identity-gateway/audit")
+	auditLogger, err := audit.NewLogger(cfg.Environment, cwLogsClient, auditStore, cfg.AuditLogGroup)
 	if err != nil {
 		slog.Error("failed to construct audit logger", "error", err)
 		os.Exit(1)
