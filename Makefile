@@ -212,13 +212,17 @@ push-function-images: build-all-lambdas
 	TF_BLOCK=$$(echo "$$DIGESTS_JSON" | jq -r 'to_entries | map("  \"" + .key + "\" = \"" + .value + "\"") | "image_digests = {\n" + join("\n") + "\n}"'); \
 	TFVARS_PATH="infra/gateway/$(TFVARS)"; \
 	if command grep -q "^image_digests" "$$TFVARS_PATH" 2>/dev/null; then \
-		awk -v block="$$TF_BLOCK" 'BEGIN{skip=0} /^image_digests[[:space:]]*=/{skip=1} skip && /\}/{skip=0; print block; next} !skip{print}' "$$TFVARS_PATH" > "$$TFVARS_PATH.tmp" && mv "$$TFVARS_PATH.tmp" "$$TFVARS_PATH"; \
+		BLOCK="$$TF_BLOCK" awk 'BEGIN{block=ENVIRON["BLOCK"]; skip=0} /^image_digests[[:space:]]*=/{skip=1} skip && /\}/{skip=0; print block; next} !skip{print}' "$$TFVARS_PATH" > "$$TFVARS_PATH.tmp" && mv "$$TFVARS_PATH.tmp" "$$TFVARS_PATH" \
+			|| { echo "ERROR: could not update image_digests in $$TFVARS_PATH"; rm -f "$$TFVARS_PATH.tmp"; exit 1; }; \
 	else \
 		printf '\n%s\n' "$$TF_BLOCK" >> "$$TFVARS_PATH"; \
 	fi; \
 	echo "==> function images pushed. image_digests written to $(TFVARS)."
 
-# Build + push the two demo images (SAML SP, OIDC RP) to their registry-stack ECR repos.
+# Build + push the two demo images (SAML SP, OIDC RP) to their registry-stack ECR
+# repos, tagged with the git SHA. The repos are IMMUTABLE and no :latest tag is
+# pushed, so capture each digest and write it into the tfvars under
+# demo_image_digests; demo-apply deploys the demo Lambdas by digest.
 push-demo-images:
 	@SAML=$$(AWS_PROFILE=$(AWS_PROFILE) terraform -chdir=infra/registry output -raw ecr_demo_saml_url 2>/dev/null); \
 	OIDC=$$(AWS_PROFILE=$(AWS_PROFILE) terraform -chdir=infra/registry output -raw ecr_demo_oidc_url 2>/dev/null); \
@@ -229,15 +233,32 @@ push-demo-images:
 	TAG=$$(git rev-parse --short HEAD 2>/dev/null || echo "dev"); \
 	echo "==> ECR login to $$REG (tag: $$TAG)"; \
 	AWS_PROFILE=$(AWS_PROFILE) aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $$REG; \
+	digest_of() { AWS_PROFILE=$(AWS_PROFILE) aws ecr describe-images --region $(AWS_REGION) \
+		--repository-name "$$(echo "$$1" | cut -d/ -f2-)" --image-ids imageTag=$$TAG \
+		--query 'imageDetails[0].imageDigest' --output text 2>/dev/null; }; \
 	echo "==> test-sp: build binary + image $$SAML:$$TAG"; \
 	( cd scripts/test-sp && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(GO_FLAGS) -o test-sp . ); \
 	DOCKER_BUILDKIT=0 docker build --platform linux/arm64 -t "$$SAML:$$TAG" -f scripts/test-sp/Dockerfile scripts/test-sp; \
 	docker push "$$SAML:$$TAG"; \
+	SP_DIGEST=$$(digest_of "$$SAML"); echo "    digest: $$SP_DIGEST"; \
 	echo "==> test-rp: build binary + image $$OIDC:$$TAG"; \
 	( cd scripts/test-rp && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build $(GO_FLAGS) -o test-rp . ); \
 	DOCKER_BUILDKIT=0 docker build --platform linux/arm64 -t "$$OIDC:$$TAG" -f scripts/test-rp/Dockerfile scripts/test-rp; \
-	docker push "$$OIDC:$$TAG"
-	@echo "==> demo images pushed."
+	docker push "$$OIDC:$$TAG"; \
+	RP_DIGEST=$$(digest_of "$$OIDC"); echo "    digest: $$RP_DIGEST"; \
+	for d in "$$SP_DIGEST" "$$RP_DIGEST"; do \
+		case "$$d" in sha256:*) ;; *) echo "ERROR: could not read a demo image digest from ECR (got '$$d')."; exit 1 ;; esac; \
+	done; \
+	TF_BLOCK=$$(printf 'demo_image_digests = {\n  "saml-sp" = "%s"\n  "oidc-rp" = "%s"\n}' "$$SP_DIGEST" "$$RP_DIGEST"); \
+	TFVARS_PATH="infra/demo/$(TFVARS)"; \
+	echo "==> Writing demo_image_digests to $(TFVARS)"; \
+	if command grep -q "^demo_image_digests" "$$TFVARS_PATH" 2>/dev/null; then \
+		BLOCK="$$TF_BLOCK" awk 'BEGIN{block=ENVIRON["BLOCK"]; skip=0} /^demo_image_digests[[:space:]]*=/{skip=1} skip && /\}/{skip=0; print block; next} !skip{print}' "$$TFVARS_PATH" > "$$TFVARS_PATH.tmp" && mv "$$TFVARS_PATH.tmp" "$$TFVARS_PATH" \
+			|| { echo "ERROR: could not update demo_image_digests in $$TFVARS_PATH"; rm -f "$$TFVARS_PATH.tmp"; exit 1; }; \
+	else \
+		printf '\n%s\n' "$$TF_BLOCK" >> "$$TFVARS_PATH"; \
+	fi; \
+	echo "==> demo images pushed. demo_image_digests written to $(TFVARS)."
 
 gateway-init:
 	AWS_PROFILE=$(AWS_PROFILE) terraform -chdir=infra/gateway init $(call tf_backend_config,gateway)
