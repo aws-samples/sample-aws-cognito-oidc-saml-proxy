@@ -88,7 +88,8 @@ func main() {
 		lambda.Start(adapter.ProxyWithContext)
 	} else {
 		log.Printf("Listening on http://localhost:%s", port)
-		log.Fatal(http.ListenAndServe(":"+port, nil))
+		// Loopback only: the pages show the signed-in user's SAML attributes.
+		log.Fatal(http.ListenAndServe("127.0.0.1:"+port, nil))
 	}
 }
 

@@ -112,7 +112,8 @@ func main() {
 	} else {
 		log.Printf("Test OIDC RP listening on http://localhost:%s", port)
 		log.Printf("  Login: http://localhost:%s/login", port)
-		log.Fatal(http.ListenAndServe(":"+port, nil))
+		// Loopback only: the pages show the signed-in user's ID-token claims.
+		log.Fatal(http.ListenAndServe("127.0.0.1:"+port, nil))
 	}
 }
 
