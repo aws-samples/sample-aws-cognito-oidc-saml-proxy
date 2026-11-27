@@ -11,7 +11,7 @@
     "capture:hero": "node scripts/capture-login-hero.mjs"
   },
   "dependencies": {
-    "@aws-sdk/client-cognito-identity-provider": "^3.1172.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1173.0",
     "amazon-cognito-identity-js": "^6.3.22",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
